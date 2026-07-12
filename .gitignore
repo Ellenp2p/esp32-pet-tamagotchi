@@ -1,0 +1,25 @@
+# --- ESP-IDF build artifacts ---
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+sdkconfig.*.bak
+*.bak
+
+# --- Local / private config ---
+sdkconfig.local
+
+# --- IDE & editor scratch ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Chat / session exports (do not commit) ---
+kimi-export-*.md
+
+# --- Python caches ---
+__pycache__/
+*.pyc

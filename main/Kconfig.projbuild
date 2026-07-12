@@ -1,0 +1,22 @@
+menu "Pet Project Configuration"
+
+    config PET_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            SSID of the Wi-Fi network the pet will connect to.
+
+    config PET_WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+        help
+            Password of the Wi-Fi network.
+
+    config PET_WIFI_MAX_RETRY
+        int "WiFi max retry count"
+        default 5
+        range 0 30
+        help
+            Maximum connection retries before giving up.
+
+endmenu
