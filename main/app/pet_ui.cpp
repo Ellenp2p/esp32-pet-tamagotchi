@@ -4,6 +4,7 @@
 #include "pet_pages.h"
 #include "pet_game_whack.h"
 #include "pet_game_sequence.h"
+#include "pet_game_gacha.h"
 #include "pet_idle_events.h"
 #include "app/ble_pet.h"
 #include "bsp/bsp_qmi8658.h"
@@ -211,26 +212,35 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
 
     lv_obj_t *whack_btn = lv_btn_create(root);
-    lv_obj_set_size(whack_btn, 140, 60);
-    lv_obj_set_pos(whack_btn, 10, 30);
+    lv_obj_set_size(whack_btn, 100, 36);
+    lv_obj_set_pos(whack_btn, 10, 28);
     lv_obj_set_style_bg_color(whack_btn, lv_color_hex(0x1976D2), 0);
     lv_obj_t *wb = lv_label_create(whack_btn);
-    lv_label_set_text(wb, "Whack-a-Mole");
+    lv_label_set_text(wb, "Whack");
     lv_obj_center(wb);
 
     int lvl = Pet::instance().get_state().level;
     lv_obj_t *seq_btn = lv_btn_create(root);
-    lv_obj_set_size(seq_btn, 140, 60);
-    lv_obj_set_pos(seq_btn, 170, 30);
+    lv_obj_set_size(seq_btn, 100, 36);
+    lv_obj_set_pos(seq_btn, 115, 28);
     lv_obj_set_style_bg_color(seq_btn,
         lvl >= 2 ? lv_color_hex(0x388E3C) : lv_color_hex(0x555555), 0);
     lv_obj_t *sb = lv_label_create(seq_btn);
-    lv_label_set_text(sb, lvl >= 2 ? "Sequence Tap" : "Sequence Tap (Lv2)");
+    lv_label_set_text(sb, lvl >= 2 ? "Sequence" : "Sequence (Lv2)");
     lv_obj_center(sb);
 
+    // Gacha button (right column of the top row).
+    lv_obj_t *gacha_btn = lv_btn_create(root);
+    lv_obj_set_size(gacha_btn, 95, 36);
+    lv_obj_set_pos(gacha_btn, 220, 28);
+    lv_obj_set_style_bg_color(gacha_btn, lv_color_hex(0xC62828), 0);
+    lv_obj_t *gb = lv_label_create(gacha_btn);
+    lv_label_set_text(gb, "Gacha");
+    lv_obj_center(gb);
+
     s_game_host = lv_obj_create(root);
-    lv_obj_set_size(s_game_host, 320, 110);
-    lv_obj_set_pos(s_game_host, 0, 98);
+    lv_obj_set_size(s_game_host, 320, 138);
+    lv_obj_set_pos(s_game_host, 0, 68);
     lv_obj_set_style_bg_color(s_game_host, lv_color_black(), 0);
     lv_obj_set_style_border_width(s_game_host, 0, 0);
     lv_obj_set_style_pad_all(s_game_host, 0, 0);
@@ -251,6 +261,13 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
         if (s_active_destroy && s_active_root) s_active_destroy(s_active_root);
         s_active_destroy = pet::game_sequence::destroy;
         s_active_root = pet::game_sequence::build(s_game_host);
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_add_event_cb(gacha_btn, [](lv_event_t *e) {
+        (void)e;
+        if (s_active_destroy && s_active_root) s_active_destroy(s_active_root);
+        s_active_destroy = pet::game_gacha::destroy;
+        s_active_root = pet::game_gacha::build(s_game_host);
     }, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_add_event_cb(root, [](lv_event_t *e) {

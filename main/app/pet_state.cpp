@@ -1,12 +1,27 @@
 #include "pet_state.h"
 #include "esp_log.h"
+#include "esp_random.h"
 
 namespace pet {
 
-static const char *TAG = "pet_state";
+static const char *TAG __attribute__((unused)) = "pet_state";
 
 // One level-up every 5 minutes of game time. Tunable.
 static constexpr int kLevelTicks = 300;
+
+// Rate scaling: every decay step happens every call, but each numeric decrement
+// has a 50% chance of being skipped, halving the effective per-second rate.
+//   fullness  awake:  -2/s  -> effective -1/s
+//   fullness  sleep:  -1/s  -> effective -1/2s (1s tick * 50% chance)
+//   happiness awake:  -1/s  -> effective -1/2s
+//   energy    awake:  -1/s  -> effective -1/2s
+//   energy    sleep:  +5/s  -> effective ~+3/s (5 * ~0.6 effective)
+//   health    sick:   -1/s  -> effective -1/2s
+//   health    heal:   +1/s  -> effective +1/2s
+//
+// coin flip uses esp_random() (hardware RNG, good enough for pacing).
+static inline bool chance_one_in(int n) { return (esp_random() % n) == 0; }
+static inline bool p50() { return (esp_random() & 1) == 0; }
 
 Pet &Pet::instance()
 {
@@ -127,24 +142,29 @@ bool Pet::spend_coins(int amount)
 
 void Pet::decay_tick()
 {
-    // fullness drops over time; sleeping slows it down.
-    fullness_  = clamp(fullness_ - (sleeping_ ? 1 : 2));
-    happiness_ = clamp(happiness_ - (sleeping_ ? 0 : 1));
+    // fullness drops over time; sleeping slows it down. 50% skip for halved rate.
+    int fullness_drop = sleeping_ ? 1 : 2;
+    if (p50()) fullness_ = clamp(fullness_ - fullness_drop);
 
+    int happiness_drop = sleeping_ ? 0 : 1;
+    if (happiness_drop > 0 && p50()) happiness_ = clamp(happiness_ - happiness_drop);
+
+    // Energy: sleeping regenerates faster. Halve the delta via 50% chance.
     if (sleeping_) {
-        energy_ = clamp(energy_ + 5);
+        if (p50()) energy_ = clamp(energy_ + 5);
     } else {
-        energy_ = clamp(energy_ - 1);
+        if (p50()) energy_ = clamp(energy_ - 1);
     }
 
-    // Health drops if neglected, otherwise slowly regenerates.
-    if (fullness_ < 20 || happiness_ < 20 || energy_ < 10) {
-        health_ = clamp(health_ - 1);
+    // Health drops if neglected, otherwise slowly regenerates. Halved rate.
+    bool sick = (fullness_ < 20 || happiness_ < 20 || energy_ < 10);
+    if (sick) {
+        if (p50()) health_ = clamp(health_ - 1);
     } else if (health_ < 100) {
-        health_ = clamp(health_ + 1);
+        if (p50()) health_ = clamp(health_ + 1);
     }
 
-    // Aging and leveling.
+    // Aging and leveling (always; these are not rate-sensitive).
     age_ticks_++;
     recompute_level();
 
