@@ -1,123 +1,160 @@
-# ESP32-S3 KOS v0.3.0
+# ESP32-S3 虚拟电子宠物 v0.2.0
 
-> **K-OS**: 一个跑在 [立创·实战派 ESP32-S3](docs/PINOUT.md) 上的轻量级「虚拟 OS」。
-> 提供 App 平台管理(注册 / 切换 / 拉起),内建默认 App(Launcher / Pet / Gacha / Settings),后续可通过 OTA 升级。
+> 一只跑在 **立创·实战派 ESP32-S3** 开发板上的桌面电子宠物,带 LVGL 界面、触摸交互、6 轴体感、蓝牙遥控、NVS 存档。
 
-## ✨ v0.3.0 重头戏
+## ✨ 功能列表
 
-| 方向 | 内容 |
-|------|------|
-| 🐢 **慢节奏** | 全局衰减速度减半,体感更顺 |
-| 🎰 **扭蛋机** | 新增 Gacha App:30 张卡池 × 5 档稀有度 `[60/25/10/4/1]`、`album` 持久化 |
-| 🧩 **App 平台** | KOS 框架:Launcher 2×2 网格、Home 切换、App 自注册,空出 OTA 通路 |
-| 💾 **OTA 通路** | 16MB Flash 重分区 → otadata + ota_0(1.5MB) + storage(~14MB),sdkconfig 启用 `BOOTLOADER_APP_ROLLBACK_ENABLE` |
+- **📊 状态仪表盘**:Fullness / Happy / Energy / Health 四条进度条,颜色随数值变化(绿 → 橙 → 红)
+- **😊 ASCII 表情脸**:根据状态自动切换 `(-_-)` / `(>_<)` / `(^o^)` / `(x_x)` 等
+- **🎮 多页面切换**:底部 Tab 栏 × 4(状态 / 游戏 / 商店 / 关于)
+- **🎯 两个小游戏**:
+  - **打地鼠**(默认解锁):3 个洞位随机点亮,1.5 秒内点中得 `+5 饼干`,Miss 扣 `1 饼干`
+  - **Sequence Tap**(Lv ≥ 2 解锁):3×3 数字格乱序,按 1→9 顺序点完通关 `+30 饼干`
+- **🛒 商店**:饼干买小食(Snack/Meal/Treat/Feast 4 档),买完自动喂食
+- **🎲 离线奖励**:宠物每隔 60~120 秒自己「发现」1~5 个饼干
+- **💤 作息节律**:Sleep/Wake 按钮控制状态,睡眠时减饥饿、加速回精力
+- **🪙 货币与等级**:饼干持久化、自动升级(`age_ticks / 300s = level`)
+- **📳 摇晃交互**:QMI8658 检测甩动 → 玩耍(休眠时唤醒),自适应阈值避免误触
+- **📡 BLE 远程控制**:NimBLE GATT 服务 `0x1234`,特征 `0x1235`(状态通知)/ `0x1236`(命令写入)
+- **💾 状态持久化**:NVS 自动 5 秒节流保存,断电重启完整恢复
 
-## ✨ v0.3.0 内置 App
-
-| App id | 名称 | 颜色 | 说明 |
-|--------|------|------|------|
-| `launcher` | Launcher | 🟦 | 2×2 应用网格,首页 |
-| `pet` | Pet | 🟩 | 状态条 + 4 动作按钮 + 衰减 / 摇晃 |
-| `gacha` | Gacha | 🟥 | 30 张卡扭蛋,10c / 抽,album 持久化 |
-| `settings` | About | ⬛ | 版本 + 已装 App 列表 |
-
-> KOS 启动后默认在 Launcher。
-> 任何 App 都通过 KOS Home 按钮返回。App 状态保留,Pet App 状态由 NVS 自动恢复。
-
-## 🛠 硬件清单(同 v0.2.0)
+## 🛠 硬件清单
 
 | 组件 | 型号 | 接口 |
 |------|------|------|
 | 主控 | ESP32-S3-WROOM-1 (8MB PSRAM, 16MB Flash) | - |
 | LCD | ST7789 320×240 | SPI3 |
 | 触摸 | FT5x06 电容触摸 | I2C0 |
-| 6 轴 IMU | QMI8658 (加速度+陀螺仪) | I2C0 |
-| IO 扩展 | PCA9557PW | I2C0 |
+| 6 轴 IMU | QMI8658 (加速度+陀螺仪) | I2C0, addr 0x6A |
+| IO 扩展 | PCA9557PW | I2C0, addr 0x19 |
 | 用户按键 | BOOT 按键 | GPIO0 |
+
+完整引脚映射见 [docs/PINOUT.md](docs/PINOUT.md)。
 
 ## 📁 目录结构
 
 ```
 esp32-pet/
-├── CMakeLists.txt
-├── partitions.csv              # 16MB 自定义分区(otadata + ota_0 + storage)
-├── sdkconfig.defaults
+├── CMakeLists.txt              # 根 CMake
+├── dependencies.lock           # 依赖锁定
+├── partitions.csv              # 16MB 自定义分区表
+├── sdkconfig.defaults          # Kconfig 默认值
+├── idf.py                      # Windows/MSYS 的 idf.py 包装
+├── monitor_read.py             # 简易串口读取脚本(45s)
 ├── main/
-│   ├── main.cpp                # 板级初始化 + kos::boot()
-│   ├── bsp/                    # 板级支持包
-│   ├── lvgl/                   # LVGL 端口
-│   ├── app/                    # 共享业务模块
-│   │   ├── pet_state.{h,cpp}   # 状态机 + 衰减行为(M1 重写)
-│   │   ├── pet_save.{h,cpp}    # NVS 持久化
-│   │   ├── pet_idle_events.cpp # 60~120s 离线奖励
-│   │   ├── pet_game_gacha.{h,cpp}    # Gacha UI / 卡池 / album
-│   │   ├── ble_pet.{h,cpp}     # NimBLE GATT
-│   ├── kos/                    # KOS 内核(M3)
-│   │   ├── kos.{h,cpp}         # boot() / start_task() / tick 调度
-│   │   ├── kos_app.h           # App / AppManifest / AppContext 接口
-│   │   ├── kos_app_registry.{h,cpp}  # 注册表 + launch()
-│   │   ├── kos_display.{h,cpp} # 全屏父对象管理
-│   │   ├── kos_input.{h,cpp}   # IMU / shake 检测
-│   │   ├── kos_launcher.cpp    # Launcher App
-│   │   ├── kos_app_pet.{h,cpp} # 迁过来的 Pet App
-│   │   ├── kos_app_gacha.{h,cpp}      # Gacha App
-│   │   └── kos_app_settings.{h,cpp}   # About App
-└── docs/
-    ├── PINOUT.md
-    ├── GAMEPLAY.md
-    ├── KOS.md                  # KOS 架构(M6)
-    └── APP_AUTHORING.md        # 如何写新 App(M6)
+│   ├── main.cpp                # 板级初始化入口
+│   ├── bsp/                    # 板级支持包(I2C / LCD / Touch / IMU / PCA9557)
+│   ├── lvgl/                   # LVGL 端口初始化
+│   └── app/                    # 业务逻辑
+│       ├── pet_state.{h,cpp}   # Pet 状态机 + 行为
+│       ├── pet_save.{h,cpp}    # NVS 持久化
+│       ├── pet_pages.{h,cpp}   # 多页面管理器
+│       ├── pet_ui.{cpp}        # Status / Shop / About 页面 + tab 栏
+│       ├── pet_game_whack.{h,cpp}     # 打地鼠游戏
+│       ├── pet_game_sequence.{h,cpp}  # 数字顺序游戏
+│       ├── pet_idle_events.cpp        # 离线奖励调度
+│       ├── ble_pet.{h,cpp}     # BLE GATT 服务
+│       └── wifi_manager.{h,cpp}        # Wi-Fi 留作扩展
+├── docs/
+│   ├── PINOUT.md               # 引脚一览(中文)
+│   └── GAMEPLAY.md             # 玩法说明(中文)
+└── managed_components/         # 拉取的 ESP-IDF 组件(已在 .gitignore)
 ```
 
-## 🚀 构建
+## 🚀 构建步骤
+
+### 前置依赖
+
+- [ESP-IDF v6.0.2](https://github.com/espressif/esp-idf/releases) (含 Python 3.11+ / CMake / Ninja)
+- ESP32-S3 USB 驱动(CH343 / CP210x)
+- 立创·实战派 ESP32-S3 开发板
+
+### Windows + Git Bash(本机已验证)
+
+本仓库根目录的 `idf.py` 包装脚本处理了 ESP-IDF 在 `C:/Espressif/tools` + git-bash MSYS 下的非标准路径问题。**直接用**:
 
 ```bash
+# 1. 拉取组件(首次)
 ./idf.py --version
+
+# 2. 编译
 ./idf.py build
+
+# 3. 烧录(开发板插上 USB,COM 端口按机器调整)
 ./idf.py -p COM5 flash
+
+# 4. 打开串口监视
 ./idf.py -p COM5 monitor
+# 或者用本仓库自带的 45 秒脚本(自动拉低 DTR 复位)
+python monitor_read.py
 ```
 
-> 注:v0.3.0 改动了分区表(`otadata + ota_0 + storage`)。
-> 烧录前请确保已经 `idf.py -p COM5 erase-flash`,否则旧分区可能不识别。
-> 当前 user (你) 已经把开发板拔了 —— 明天起来先 `erase-flash` 再 `flash`。
+### Linux / macOS
 
-## 🧠 KOS 架构 (v0.3.0 概览)
+```bash
+source $IDF_PATH/export.sh
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+```
 
-KOS 是一个「**单一进程静态链接 App 平台**」:
+> 注:在 Linux 下 `monitor_read.py` 需要修改 `COM5` 为 `/dev/ttyUSB0`。
 
-- 所有 App 用 C++ 写,继承 `kos::App`,通过 `kos::AppContext` 拿到屏幕 + tick 时钟。
-- App **静态注册**:每个 `app.cpp` 末尾放一个静态实例 + 一个 `kos::registry::internals::StaticRegistrar` 自动注册(`KOS_APP_DEFINE` 在 GCC 嵌套命名空间下有 paste bug,这里手写)。
-- `registry::launch(id)` 切换 App;旧的 `on_pause()` → 新的 `on_start(ctx)`。
-- 主循环在 FreeRTOS 任务里 100ms 调一次 `current->on_tick(now_ms)`。
-- 资源(显示 / 输入 / 存储 / IMU / BLE / 音频)都走 `kos_*` 前缀函数。
+## ⚙️ 配置 Wi-Fi(可选,默认未连接)
 
-后续 v0.4.0 计划:真正从 SPIFFS `.bin` 动态装卸 App。当前是「manifest 在 SPIFFS,代码在 OS .bin 内」—— 数据和代码分离。
+`sdkconfig.defaults` 中 Wi-Fi 凭证已置空。需要联网时:
 
-完整设计见 [docs/KOS.md](docs/KOS.md)和 [docs/APP_AUTHORING.md](docs/APP_AUTHORING.md)。
+```bash
+./idf.py menuconfig
+# 导航到: Pet project defaults  --->  Wi-Fi SSID / Password
+./idf.py build flash
+```
 
-## 📡 BLE
+或通过环境变量一次性传入:
 
-v0.3.0 不改 BLE 协议,继续使用 v0.2.0 的 `0x1234/0x1235/0x1236`。
-具体命令见 [docs/GAMEPLAY.md](docs/GAMEPLAY.md)。
+```bash
+CONFIG_PET_WIFI_SSID="你的 SSID" CONFIG_PET_WIFI_PASSWORD="你的密码" ./idf.py build
+```
 
-> 下一步:扩展 `0x1236` 写一个 `I` 命令进入 App 安装模式(接收 SPIFFS App 包)。
+> Wi-Fi 模块当前**未在 main.cpp 启动**,只保留作为后续扩展(联网解锁 / OTA)的接口。
+
+## 📲 蓝牙遥控
+
+开发板以 `ESP-Pet` 名称广播,使用任意 BLE 调试器(推荐 nRF Connect / LightBlue)连接:
+
+| UUID | 属性 | 说明 |
+|------|------|------|
+| `0x1234` | Service | 自定义 Pet 服务 |
+| `0x1235` | READ + NOTIFY | 5 字节状态通知:`[fullness, happiness, energy, health, sleeping]` |
+| `0x1236` | WRITE | 单字节命令:`f` 喂食 / `p` 玩 / `s` 睡 / `w` 醒 / `c` 抚摸 |
+
+> ⚠️ **协议变更(v0.2.0)**:第 0 字节语义从 "hunger"(0=饱 → 100=饿)反转为 "fullness"(0=饿 → 100=饱)。**所有 v0.2.0 之前版本的 BLE 客户端需要反转处理第 0 字节**。下一个版本会引入 `protocol_version` 字节前导以彻底解决兼容。
 
 ## 🎮 玩法
 
-| 关键 | 内容 |
-|------|------|
-| 玩 Pet | 摇动 / Play 按钮 / Feed / Sleep |
-| 玩 Gacha | 10 饼干抽 1 次,5% 概率抽到 Rare+ |
-| 升级 | Pet `age_ticks / 300s` 自动 +1 level,Lv ≥ 2 解锁高级内容 |
+完整说明见 [docs/GAMEPLAY.md](docs/GAMEPLAY.md)。
 
-## 🤝 贡献 & 下一步
+要点速览:
 
-- [ ] 真实音效(LEDC PWM 蜂鸣器)
-- [ ] SPIFFS 动态装卸 App(ELF 加载)
-- [ ] 多 OTA 槽位(ota_0 / ota_1 双分区)
-- [ ] Gacha 主题色 / 全屏动画
-- [ ] 真实卡片图像资源(BMP / PNG)
+- 4 根条都是「**高=好**」。Fullness 降到 < 25 时变橙,< 10 变红,提醒你赶紧喂食。
+- 摇动开发板 = Play(休眠时=Wake)。
+- 60~120 秒后回来检查,可能多了几个饼干。
+- 升级后 Sequence Tap 解锁,商店能买更贵的小食。
+
+## 📝 已知限制
+
+- 没有真实音效(蜂鸣器未驱动)。
+- 没有动画精灵,只有 ASCII 表情。
+- BLE 没有配对绑定(`sm_bonding=0`),谁连都能控制。
+- 自动重启会清空 idle event 调度器(下次启动重新随机 60~120 秒)。
+- 长时间不喂食 → fullness 归零 → health 持续下降。**别让你的宠物饿死**。
+
+## 🤝 贡献
+
+欢迎 PR!建议的方向:
+- 接入真实音效(LEDC PWM 蜂鸣器)
+- 加新游戏(贪吃蛇?记忆翻牌?)
+- SPIFFS 存档代替 NVS 存历史统计
+- 多只宠物并存
 
 ## 📜 许可证
 

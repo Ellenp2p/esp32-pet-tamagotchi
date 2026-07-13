@@ -12,10 +12,6 @@ CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# KOS v0.3.0 OTA support.
-# Bootloader can roll back a bad app to the previous ota_0.
-CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-
 # Compiler: optimize for size to fit BLE+WiFi+LVGL into the factory partition
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 
