@@ -160,10 +160,14 @@ bool QMI8658::detect_shake(QMI8658_Data &data)
     // (observed resting magnitude ~17000–18000 here), so derive the 1g
     // baseline empirically. Use a slow EMA of the magnitude, gated by a
     // spike guard so transient impulses cannot lift the baseline.
+    //
+    // Thresholds are tuned aggressively: the pet only triggers on a clear
+    // intent-to-play motion, not on small jostles from sitting on a desk.
+    // Threshold ≈ 15000 LSB (≈0.85g deviation from rest) and 1.5s cooldown.
     const float SHAKE_EMA_ALPHA = 0.005f;       // ~20s time constant at 100Hz
-    const float SHAKE_DELTA = 8000.0f;         // dynamic deviation required
+    const float SHAKE_DELTA = 15000.0f;        // dynamic deviation required
     const float SPIKE_GUARD = 4000.0f;         // ignore samples jumping > this
-    const uint32_t SHAKE_COOLDOWN_MS = 500;
+    const uint32_t SHAKE_COOLDOWN_MS = 1500;
     const uint32_t EMA_SETTLE_SAMPLES = 30;
 
     float mag = accel_magnitude(data);

@@ -6,21 +6,27 @@ namespace pet {
 
 static const char *TAG __attribute__((unused)) = "pet_state";
 
-// One level-up every 5 minutes of game time. Tunable.
-static constexpr int kLevelTicks = 300;
+// One level-up every 30 decay ticks = 30 * 10s = 5 minutes of game time.
+// Tunable.
+static constexpr int kLevelTicks = 30;
 
-// Rate scaling: every decay step happens every call, but each numeric decrement
-// has a 50% chance of being skipped, halving the effective per-second rate.
-//   fullness  awake:  -2/s  -> effective -1/s
-//   fullness  sleep:  -1/s  -> effective -1/2s (1s tick * 50% chance)
-//   happiness awake:  -1/s  -> effective -1/2s
-//   energy    awake:  -1/s  -> effective -1/2s
-//   energy    sleep:  +5/s  -> effective ~+3/s (5 * ~0.6 effective)
-//   health    sick:   -1/s  -> effective -1/2s
-//   health    heal:   +1/s  -> effective +1/2s
+// Rate scaling: every decay step happens once every TICK_MS (10s), and each
+// numeric decrement has a 50% chance of being skipped. Effective per-second
+// rate at TICK_MS=10s and 50% skip:
+//   fullness  awake:  -2/10s * 50% = -0.10/s   (70 -> 20 in ~8 min,
+//                                                70 -> 0  in ~12 min)
+//   fullness  sleep:  -1/10s * 50% = -0.05/s   (sleep slows decay 2x)
+//   happiness awake:  -1/10s * 50% = -0.05/s
+//   energy    awake:  -1/10s * 50% = -0.05/s
+//   energy    sleep:  +5/10s * 50% = +0.25/s   (sleep recovers ~12 min full)
+//   health    sick:   -1/10s * 50% = -0.05/s
+//   health    heal:   +1/10s * 50% = +0.05/s
 //
-// coin flip uses esp_random() (hardware RNG, good enough for pacing).
-static inline bool chance_one_in(int n) { return (esp_random() % n) == 0; }
+// Goal: pet only needs meaningful attention (Feed/Play/Sleep) once every
+// 30–60 minutes, not every minute. This keeps the "obligation to care"
+// sparse enough that the device can be left alone for hours without the
+// pet dying, while still feeling alive enough that stats visibly drift
+// during a normal session.
 static inline bool p50() { return (esp_random() & 1) == 0; }
 
 Pet &Pet::instance()
@@ -176,7 +182,10 @@ void Pet::update()
     TickType_t now = xTaskGetTickCount();
     uint32_t elapsed_ms = (now - last_update_tick_) * portTICK_PERIOD_MS;
 
-    const uint32_t TICK_MS = 1000; // decay every second
+    // Decay every 10 seconds (combined with 50% skip in decay_tick this
+    // gives a per-second rate roughly 1/20 of the raw -2 base — i.e. on the
+    // order of minutes-to-hours for visible stat change).
+    const uint32_t TICK_MS = 10000;
     while (elapsed_ms >= TICK_MS) {
         decay_tick();
         elapsed_ms -= TICK_MS;
