@@ -256,7 +256,7 @@ lv_obj_t *build(lv_obj_t *parent)
     lv_label_set_text(s_ctx.info_label, "10 coins / pull");
     lv_obj_align(s_ctx.info_label, LV_ALIGN_TOP_LEFT, 180, 40);
 
-    s_ctx.pull_btn = lv_btn_create(s_ctx.root);
+    s_ctx.pull_btn = lv_button_create(s_ctx.root);
     lv_obj_set_size(s_ctx.pull_btn, 120, 50);
     lv_obj_align(s_ctx.pull_btn, LV_ALIGN_TOP_LEFT, 180, 70);
     lv_obj_set_style_bg_color(s_ctx.pull_btn, lv_color_hex(0xD32F2F), 0);
@@ -265,7 +265,7 @@ lv_obj_t *build(lv_obj_t *parent)
     lv_obj_center(pl);
     lv_obj_add_event_cb(s_ctx.pull_btn, pull_cb, LV_EVENT_CLICKED, nullptr);
 
-    s_ctx.album_btn = lv_btn_create(s_ctx.root);
+    s_ctx.album_btn = lv_button_create(s_ctx.root);
     lv_obj_set_size(s_ctx.album_btn, 120, 36);
     lv_obj_align(s_ctx.album_btn, LV_ALIGN_TOP_LEFT, 180, 140);
     lv_obj_set_style_bg_color(s_ctx.album_btn, lv_color_hex(0x1976D2), 0);

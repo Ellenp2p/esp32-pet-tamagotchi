@@ -55,7 +55,7 @@ void build_tabs(lv_obj_t *screen)
 
     // Tab bar at the bottom: 4 buttons of 80x32.
     for (int i = 0; i < (int)Page::Count; i++) {
-        lv_obj_t *btn = lv_btn_create(screen);
+        lv_obj_t *btn = lv_button_create(screen);
         lv_obj_set_size(btn, 80, 32);
         lv_obj_set_pos(btn, i * 80, 208);
         lv_obj_add_event_cb(btn, tab_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);

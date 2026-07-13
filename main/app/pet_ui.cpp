@@ -5,6 +5,7 @@
 #include "pet_game_whack.h"
 #include "pet_game_sequence.h"
 #include "pet_game_gacha.h"
+#include "pet_frames.h"
 #include "pet_idle_events.h"
 #include "app/ble_pet.h"
 #include "bsp/bsp_qmi8658.h"
@@ -19,39 +20,131 @@ namespace pet {
 static const char *TAG = "pet_ui";
 
 // ---------------- Status page widgets (live across the page's lifetime) -----
-static lv_obj_t *face_label_ = nullptr;
+// Hand-rolled lv_image + lv_anim for full control over frame timing per state.
+static lv_obj_t *face_img_ = nullptr;
+static lv_anim_t face_anim_buf_;       // backing storage for the anim
 static lv_obj_t *status_label_ = nullptr;
 static lv_obj_t *bars_[4] = {nullptr};
 static lv_obj_t *btn_sleep_ = nullptr;
 
+// Animation state machine.
+static pet_anim_state_t current_anim_ = PET_ANIM_COUNT;  // sentinel: forces init
+static bool action_animation_active_ = false;
+
 static const char *BAR_NAMES[4] = {"Fullness", "Happy", "Energy", "Health"};
 
-// Color thresholds for status bars. <25 = orange, <10 = red, else green.
+static const uint32_t kFrameMs[PET_ANIM_COUNT] = {
+    200,  // IDLE
+    180,  // HAPPY
+    160,  // EATING
+    400,  // SLEEPING
+    180,  // PLAYING
+    240,  // SICK
+};
+static const uint16_t kFrameCount = 9;
+
 static void set_bar_value_with_warn(lv_obj_t *bar, int value)
 {
     lv_bar_set_value(bar, value, LV_ANIM_OFF);
     lv_color_t color;
-    if (value < 10)      color = lv_color_hex(0xE53935); // red
-    else if (value < 25) color = lv_color_hex(0xFB8C00); // orange
-    else                 color = lv_color_hex(0x43A047); // green
+    if (value < 10)      color = lv_color_hex(0xE53935);
+    else if (value < 25) color = lv_color_hex(0xFB8C00);
+    else                 color = lv_color_hex(0x43A047);
     lv_obj_set_style_bg_color(bar, color, LV_PART_INDICATOR);
 }
 
-static const char *get_face_text(const State &s, bool sleeping)
+// ---------------- Animation control ----------------------------------------
+// Decide which animation best reflects the pet's current state. Sleeping
+// always wins; if any vital is critically low, we show Sick; otherwise the
+// mood tracks happiness + energy.
+static pet_anim_state_t resolve_anim_state(const State &s, bool sleeping);
+
+// Per-tick callback: advance the frame index and refresh lv_img src.
+// `var` is the lv_img; `value` is the integer "tick" counter (we keep the
+// current anim in current_anim_ to know which frame table to index).
+static void anim_frame_exec(void *var, int32_t value);
+
+// Animation runner (declared early so anim_ready_cb can call it).
+static void switch_to_animation(pet_anim_state_t anim);
+
+static pet_anim_state_t resolve_anim_state(const State &s, bool sleeping)
 {
-    if (sleeping) return "(-_-)zzZ";
-    if (s.health < 30) return "(x_x)";
-    if (s.fullness < 20) return "(>_<)";
-    if (s.happiness > 80 && s.energy > 50) return "(^o^)";
-    if (s.happiness < 30) return "(T_T)";
-    if (s.energy < 30) return "(-.-)";
-    return "(^_^)";
+    if (sleeping) return PET_ANIM_SLEEPING;
+    if (s.health < 30 || s.fullness < 20 || s.happiness < 20) return PET_ANIM_SICK;
+    if (s.happiness > 80 && s.energy > 50) return PET_ANIM_HAPPY;
+    return PET_ANIM_IDLE;
+}
+
+static void anim_frame_exec(void *var, int32_t value)
+{
+    lv_obj_t *img = (lv_obj_t *)var;
+    const pet_anim_state_t anim = current_anim_;
+    if (anim >= PET_ANIM_COUNT) return;
+    const int32_t idx = value % (int32_t)kFrameCount;
+    if (idx < 0) return;
+    lv_image_set_src(img, pet_anim_frames[anim][idx]);
+}
+
+static void anim_ready_cb(lv_anim_t *a)
+{
+    if (action_animation_active_) {
+        action_animation_active_ = false;
+        const State s = Pet::instance().get_state();
+        const pet_anim_state_t next =
+            resolve_anim_state(s, Pet::instance().is_sleeping());
+        if (next != current_anim_) switch_to_animation(next);
+    } else {
+        lv_anim_set_repeat_count(a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_start(a);
+    }
+}
+
+static void switch_to_animation(pet_anim_state_t anim)
+{
+    if (!face_img_) return;
+    if (anim >= PET_ANIM_COUNT) return;
+    current_anim_ = anim;
+
+    lv_anim_init(&face_anim_buf_);
+    lv_anim_set_var(&face_anim_buf_, face_img_);
+    lv_anim_set_exec_cb(&face_anim_buf_, anim_frame_exec);
+    lv_anim_set_values(&face_anim_buf_, 0, (int32_t)kFrameCount);
+    lv_anim_set_duration(&face_anim_buf_, kFrameCount * kFrameMs[anim]);
+    lv_anim_set_repeat_count(&face_anim_buf_, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_ready_cb(&face_anim_buf_, anim_ready_cb);
+    lv_anim_start(&face_anim_buf_);
+
+    // Show frame 0 immediately so the screen is never blank before first tick.
+    lv_image_set_src(face_img_, pet_anim_frames[anim][0]);
+    lv_obj_invalidate(face_img_);
+}
+
+// One-shot action animation: plays N loops then falls back to stat-based.
+static lv_anim_t action_anim_buf_;
+static void start_action_anim(pet_anim_state_t anim, uint16_t repeat_count)
+{
+    if (!face_img_) return;
+    if (anim >= PET_ANIM_COUNT) return;
+    action_animation_active_ = true;
+    current_anim_ = anim;
+
+    lv_anim_init(&action_anim_buf_);
+    lv_anim_set_var(&action_anim_buf_, face_img_);
+    lv_anim_set_exec_cb(&action_anim_buf_, anim_frame_exec);
+    lv_anim_set_values(&action_anim_buf_, 0, (int32_t)kFrameCount);
+    lv_anim_set_duration(&action_anim_buf_, kFrameCount * kFrameMs[anim]);
+    lv_anim_set_repeat_count(&action_anim_buf_, repeat_count);
+    lv_anim_set_ready_cb(&action_anim_buf_, anim_ready_cb);
+    lv_anim_start(&action_anim_buf_);
+
+    lv_image_set_src(face_img_, pet_anim_frames[anim][0]);
+    lv_obj_invalidate(face_img_);
 }
 
 // ---------------- Update loop ------------------------------------------------
 static void update_ui()
 {
-    if (!face_label_) return;  // status page not built yet
+    if (!face_img_) return;
 
     State s = Pet::instance().get_state();
     bool sleeping = Pet::instance().is_sleeping();
@@ -61,7 +154,10 @@ static void update_ui()
     set_bar_value_with_warn(bars_[2], s.energy);
     set_bar_value_with_warn(bars_[3], s.health);
 
-    lv_label_set_text(face_label_, get_face_text(s, sleeping));
+    if (!action_animation_active_) {
+        const pet_anim_state_t target = resolve_anim_state(s, sleeping);
+        if (target != current_anim_) switch_to_animation(target);
+    }
 
     char status[96];
     snprintf(status, sizeof(status), "%s | Lv%d | F:%d Ha:%d E:%d He:%d | Coins:%d",
@@ -78,8 +174,16 @@ static void on_update_timer(lv_timer_t *timer)
 }
 
 // ---------------- Action button callbacks -----------------------------------
-static void btn_feed_cb(lv_event_t *e)  { Pet::instance().feed(); }
-static void btn_play_cb(lv_event_t *e)  { Pet::instance().play(); }
+static void btn_feed_cb(lv_event_t *e)
+{
+    Pet::instance().feed();
+    start_action_anim(PET_ANIM_EATING, 2);  // 2 × 9 × 160ms ≈ 2.9s
+}
+static void btn_play_cb(lv_event_t *e)
+{
+    Pet::instance().play();
+    start_action_anim(PET_ANIM_PLAYING, 3);  // 3 × 9 × 180ms ≈ 4.9s
+}
 static void btn_sleep_cb(lv_event_t *e)
 {
     if (Pet::instance().is_sleeping()) Pet::instance().wake_up();
@@ -98,23 +202,24 @@ static lv_obj_t *build_page_status(lv_obj_t *parent)
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_style_pad_all(root, 0, 0);
 
-    face_label_ = lv_label_create(root);
-    lv_obj_set_style_text_font(face_label_, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(face_label_, lv_color_white(), 0);
-    lv_label_set_text(face_label_, "(^_^)");
-    lv_obj_align(face_label_, LV_ALIGN_TOP_MID, 0, 4);
+    // Pet sprite — 96x96 native, no scaling.
+    face_img_ = lv_image_create(root);
+    lv_obj_set_size(face_img_, 96, 96);
+    lv_obj_align(face_img_, LV_ALIGN_TOP_LEFT, 4, 4);
+    lv_image_set_src(face_img_, pet_anim_frames[PET_ANIM_IDLE][0]);
+    lv_obj_invalidate(face_img_);
 
     status_label_ = lv_label_create(root);
     lv_obj_set_style_text_font(status_label_, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(status_label_, lv_color_white(), 0);
     lv_label_set_text(status_label_, "Initializing...");
-    lv_obj_align(status_label_, LV_ALIGN_TOP_MID, 0, 32);
+    lv_obj_align(status_label_, LV_ALIGN_TOP_LEFT, 108, 6);
 
-    // 4 bars stacked tightly to leave room for action buttons at bottom.
+    // 4 bars stacked tightly on the right side, below status label.
     for (int i = 0; i < 4; i++) {
         lv_obj_t *container = lv_obj_create(root);
-        lv_obj_set_size(container, 300, 18);
-        lv_obj_align(container, LV_ALIGN_TOP_LEFT, 10, 56 + i * 20);
+        lv_obj_set_size(container, 208, 22);
+        lv_obj_align(container, LV_ALIGN_TOP_LEFT, 108, 28 + i * 24);
         lv_obj_set_style_pad_all(container, 2, 0);
         lv_obj_set_style_bg_color(container, lv_color_hex(0x333333), 0);
         lv_obj_set_style_border_width(container, 0, 0);
@@ -126,15 +231,15 @@ static lv_obj_t *build_page_status(lv_obj_t *parent)
         lv_obj_align(name, LV_ALIGN_LEFT_MID, 4, 0);
 
         bars_[i] = lv_bar_create(container);
-        lv_obj_set_size(bars_[i], 200, 10);
+        lv_obj_set_size(bars_[i], 120, 10);
         lv_obj_align(bars_[i], LV_ALIGN_RIGHT_MID, -4, 0);
         lv_bar_set_range(bars_[i], 0, 100);
         lv_bar_set_value(bars_[i], 50, LV_ANIM_OFF);
     }
 
-    // Action buttons row at bottom of the status page.
+    // Action buttons row at bottom (full width).
     auto make_btn = [&](const char *text, lv_align_t align, int x, lv_event_cb_t cb) {
-        lv_obj_t *btn = lv_btn_create(root);
+        lv_obj_t *btn = lv_button_create(root);
         lv_obj_set_size(btn, 70, 28);
         lv_obj_align(btn, align, x, -8);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
@@ -156,10 +261,13 @@ static lv_obj_t *build_page_status(lv_obj_t *parent)
 
 static void destroy_page_status(lv_obj_t *root)
 {
-    face_label_ = nullptr;
+    // Stop any pending anim before deleting the widget it points at.
+    lv_anim_del(face_img_, nullptr);
+    face_img_ = nullptr;
     status_label_ = nullptr;
     btn_sleep_ = nullptr;
     for (int i = 0; i < 4; i++) bars_[i] = nullptr;
+    action_animation_active_ = false;
     if (root) lv_obj_del(root);
 }
 
@@ -221,8 +329,6 @@ static void on_card_clicked(lv_event_t *e)
 
 static void on_card_freed(lv_event_t *e)
 {
-    // The DELETE event carries the user_data we registered on the card button,
-    // which is the CardCb* itself.
     CardCb *cb = (CardCb *)lv_event_get_user_data(e);
     delete cb;
 }
@@ -242,11 +348,6 @@ static void on_back_clicked(lv_event_t *e)
 
 static lv_obj_t *build_page_games(lv_obj_t *parent)
 {
-    // Games page has two states:
-    //   - picker: 3 game cards filling the 320x208 content area.
-    //   - play:   one game occupies the full area; a "Back" button in the
-    //             top-left corner returns to the picker.
-
     lv_obj_t *root = lv_obj_create(parent);
     lv_obj_set_size(root, 320, 208);
     lv_obj_set_style_bg_color(root, lv_color_black(), 0);
@@ -264,7 +365,6 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
         delete c;
     }, LV_EVENT_DELETE, root);
 
-    // ---- Picker (3 large cards, full-screen) ----
     gctx->picker = lv_obj_create(root);
     lv_obj_set_size(gctx->picker, 320, 208);
     lv_obj_set_pos(gctx->picker, 0, 0);
@@ -284,7 +384,7 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
                          bool enabled,
                          lv_obj_t *(*build_fn)(lv_obj_t *),
                          void (*destroy_fn)(lv_obj_t *)) {
-        lv_obj_t *card = lv_btn_create(gctx->picker);
+        lv_obj_t *card = lv_button_create(gctx->picker);
         lv_obj_set_size(card, 95, 140);
         lv_obj_set_pos(card, 12 + col * 102, 32);
         lv_obj_set_style_bg_color(card, lv_color_hex(enabled ? color : 0x555555), 0);
@@ -316,8 +416,7 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
     make_card(2, "Gacha",    0xC62828, true,
               pet::game_gacha::build,    pet::game_gacha::destroy);
 
-    // ---- Back overlay (hidden until play state) ----
-    gctx->back_btn = lv_btn_create(root);
+    gctx->back_btn = lv_button_create(root);
     lv_obj_set_size(gctx->back_btn, 56, 22);
     lv_obj_set_pos(gctx->back_btn, 2, 2);
     lv_obj_set_style_bg_color(gctx->back_btn, lv_color_hex(0x37474F), 0);
@@ -332,7 +431,6 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
 
 static void destroy_page_games(lv_obj_t *root)
 {
-    // The DELETE handler on root frees the GamesCtx. Nothing to do here.
     (void)root;
 }
 
@@ -350,7 +448,6 @@ static lv_obj_t *build_page_shop(lv_obj_t *parent)
     lv_label_set_text(title, "Shop");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
 
-    // 4 items, 2 rows of 2 cards. Each card shows name + price.
     struct Item { const char *name; int amount; int price; };
     static const Item items[4] = {
         {"Snack",   10, 10},
@@ -361,7 +458,7 @@ static lv_obj_t *build_page_shop(lv_obj_t *parent)
     for (int i = 0; i < 4; i++) {
         int col = i % 2;
         int row = i / 2;
-        lv_obj_t *card = lv_btn_create(root);
+        lv_obj_t *card = lv_button_create(root);
         lv_obj_set_size(card, 140, 70);
         lv_obj_set_pos(card, 15 + col * 150, 36 + row * 80);
         lv_obj_set_style_bg_color(card, lv_color_hex(0x37474F), 0);
@@ -380,7 +477,6 @@ static lv_obj_t *build_page_shop(lv_obj_t *parent)
         lv_label_set_text(stat, buf);
         lv_obj_align(stat, LV_ALIGN_BOTTOM_MID, 0, -8);
 
-        // Use user_data to identify which item this card buys.
         lv_obj_add_event_cb(card, [](lv_event_t *e) {
             int idx = (int)(intptr_t)lv_event_get_user_data(e);
             const Item *it = &items[idx];
@@ -398,7 +494,7 @@ static lv_obj_t *build_page_shop(lv_obj_t *parent)
 static lv_obj_t *build_page_about(lv_obj_t *parent)
 {
     return build_page_placeholder(parent, "About",
-        "ESP32-S3 Pet v0.2.0\nLVGL 8.3.0 + NimBLE\nFS:BSD Pet Project");
+        "ESP32-S3 Pet v0.4.0\nLVGL 9.4 + NimBLE\nFS:BSD Pet Project");
 }
 
 // ---------------- Boot --------------------------------------------------------
@@ -407,17 +503,14 @@ static void build_ui()
     lv_obj_t *screen = lv_scr_act();
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
 
-    // Register page builders.
     pet::pages::register_page(pet::pages::Page::Status, build_page_status, destroy_page_status);
     pet::pages::register_page(pet::pages::Page::Games,  build_page_games,  destroy_page_games);
     pet::pages::register_page(pet::pages::Page::Shop,   build_page_shop,   nullptr);
     pet::pages::register_page(pet::pages::Page::About,  build_page_about,  nullptr);
 
-    // Tab bar + initial page.
     pet::pages::build_tabs(screen);
     pet::pages::switch_page(pet::pages::Page::Status);
 
-    // Update UI timer in LVGL task context.
     lv_timer_create(on_update_timer, 500, nullptr);
 }
 
@@ -433,7 +526,7 @@ static void pet_task(void *arg)
         pet::idle_events::tick(Pet::instance().get_state().age_ticks);
 
         if (Pet::instance().is_dirty()) {
-            if (++save_counter >= 50) {  // 50 * 100ms = 5s
+            if (++save_counter >= 50) {
                 pet::save::save_if_dirty(Pet::instance(), false);
                 save_counter = 0;
             }

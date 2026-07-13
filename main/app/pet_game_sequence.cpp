@@ -114,7 +114,7 @@ lv_obj_t *build(lv_obj_t *parent)
     for (int i = 0; i < kTiles; i++) {
         int col = i % 3;
         int row = i / 3;
-        lv_obj_t *tile = lv_btn_create(s_ctx.root);
+        lv_obj_t *tile = lv_button_create(s_ctx.root);
         lv_obj_set_size(tile, 90, 50);
         lv_obj_set_pos(tile, 20 + col * 95, 40 + row * 55);
         lv_obj_set_style_bg_color(tile, lv_color_hex(0x37474F), 0);

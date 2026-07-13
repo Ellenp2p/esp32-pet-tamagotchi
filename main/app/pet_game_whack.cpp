@@ -160,7 +160,7 @@ lv_obj_t *build(lv_obj_t *parent)
 
     // 3 holes, 90x90 each, evenly spaced.
     for (int i = 0; i < kHoles; i++) {
-        lv_obj_t *hole = lv_btn_create(s_ctx.root);
+        lv_obj_t *hole = lv_button_create(s_ctx.root);
         lv_obj_set_size(hole, 90, 90);
         lv_obj_set_pos(hole, 10 + i * 100, 60);
         lv_obj_set_style_bg_color(hole, lv_color_hex(0x37474F), 0);
@@ -170,7 +170,7 @@ lv_obj_t *build(lv_obj_t *parent)
         s_ctx.holes[i] = hole;
     }
 
-    s_ctx.start_btn = lv_btn_create(s_ctx.root);
+    s_ctx.start_btn = lv_button_create(s_ctx.root);
     lv_obj_set_size(s_ctx.start_btn, 100, 32);
     lv_obj_align(s_ctx.start_btn, LV_ALIGN_BOTTOM_MID, 0, -8);
     lv_obj_t *start_label = lv_label_create(s_ctx.start_btn);
