@@ -185,19 +185,67 @@ static lv_obj_t *build_page_placeholder(lv_obj_t *parent, const char *title, con
     return root;
 }
 
+// Games page shared state (file-scope). CardCb is allocated per picker card and
+// freed when the card is deleted. Both are referenced by free-function event
+// handlers below; they live outside build_page_games() so the handlers can see
+// them without implicit capture.
+struct GamesCtx {
+    lv_obj_t *root = nullptr;
+    lv_obj_t *picker = nullptr;
+    lv_obj_t *game_root = nullptr;
+    lv_obj_t *back_btn = nullptr;
+    void (*active_destroy)(lv_obj_t *) = nullptr;
+};
+struct CardCb {
+    GamesCtx *c;
+    lv_obj_t *(*build_fn)(lv_obj_t *);
+    void (*destroy_fn)(lv_obj_t *);
+};
+
+static void on_card_clicked(lv_event_t *e)
+{
+    CardCb *cb = (CardCb *)lv_event_get_user_data(e);
+    if (!cb || !cb->c) return;
+    if (cb->c->active_destroy && cb->c->game_root) {
+        cb->c->active_destroy(cb->c->game_root);
+        cb->c->game_root = nullptr;
+    }
+    if (cb->c->picker) lv_obj_add_flag(cb->c->picker, LV_OBJ_FLAG_HIDDEN);
+    cb->c->active_destroy = cb->destroy_fn;
+    cb->c->game_root = cb->build_fn(cb->c->root);
+    if (cb->c->back_btn) {
+        lv_obj_clear_flag(cb->c->back_btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(cb->c->back_btn);
+    }
+}
+
+static void on_card_freed(lv_event_t *e)
+{
+    // The DELETE event carries the user_data we registered on the card button,
+    // which is the CardCb* itself.
+    CardCb *cb = (CardCb *)lv_event_get_user_data(e);
+    delete cb;
+}
+
+static void on_back_clicked(lv_event_t *e)
+{
+    GamesCtx *c = (GamesCtx *)lv_event_get_user_data(e);
+    if (!c) return;
+    if (c->active_destroy && c->game_root) {
+        c->active_destroy(c->game_root);
+        c->game_root = nullptr;
+    }
+    c->active_destroy = nullptr;
+    if (c->back_btn) lv_obj_add_flag(c->back_btn, LV_OBJ_FLAG_HIDDEN);
+    if (c->picker) lv_obj_clear_flag(c->picker, LV_OBJ_FLAG_HIDDEN);
+}
+
 static lv_obj_t *build_page_games(lv_obj_t *parent)
 {
-    // File-scope state for which mini-game is currently mounted inside the Games page.
-    // Survives across Games-page rebuilds so the host container can clean up.
-    static lv_obj_t *s_game_host = nullptr;
-    static lv_obj_t *s_active_root = nullptr;
-    static void (*s_active_destroy)(lv_obj_t *) = nullptr;
-
-    auto mount_game = [&](lv_obj_t *(*builder)(lv_obj_t *), void (*destroy)(lv_obj_t *)) {
-        if (s_active_destroy && s_active_root) s_active_destroy(s_active_root);
-        s_active_destroy = destroy;
-        s_active_root = builder(s_game_host);
-    };
+    // Games page has two states:
+    //   - picker: 3 game cards filling the 320x208 content area.
+    //   - play:   one game occupies the full area; a "Back" button in the
+    //             top-left corner returns to the picker.
 
     lv_obj_t *root = lv_obj_create(parent);
     lv_obj_set_size(root, 320, 208);
@@ -205,80 +253,87 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_style_pad_all(root, 0, 0);
 
-    lv_obj_t *title = lv_label_create(root);
+    auto *gctx = new GamesCtx();
+    gctx->root = root;
+    lv_obj_set_user_data(root, gctx);
+    lv_obj_add_event_cb(root, [](lv_event_t *e) {
+        GamesCtx *c = (GamesCtx *)lv_obj_get_user_data(
+            (lv_obj_t *)lv_event_get_user_data(e));
+        if (!c) return;
+        if (c->active_destroy && c->game_root) c->active_destroy(c->game_root);
+        delete c;
+    }, LV_EVENT_DELETE, root);
+
+    // ---- Picker (3 large cards, full-screen) ----
+    gctx->picker = lv_obj_create(root);
+    lv_obj_set_size(gctx->picker, 320, 208);
+    lv_obj_set_pos(gctx->picker, 0, 0);
+    lv_obj_set_style_bg_color(gctx->picker, lv_color_black(), 0);
+    lv_obj_set_style_border_width(gctx->picker, 0, 0);
+    lv_obj_set_style_pad_all(gctx->picker, 0, 0);
+
+    lv_obj_t *title = lv_label_create(gctx->picker);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
-    lv_label_set_text(title, "Games");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
-
-    lv_obj_t *whack_btn = lv_btn_create(root);
-    lv_obj_set_size(whack_btn, 100, 36);
-    lv_obj_set_pos(whack_btn, 10, 28);
-    lv_obj_set_style_bg_color(whack_btn, lv_color_hex(0x1976D2), 0);
-    lv_obj_t *wb = lv_label_create(whack_btn);
-    lv_label_set_text(wb, "Whack");
-    lv_obj_center(wb);
+    lv_label_set_text(title, "Pick a game");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
     int lvl = Pet::instance().get_state().level;
-    lv_obj_t *seq_btn = lv_btn_create(root);
-    lv_obj_set_size(seq_btn, 100, 36);
-    lv_obj_set_pos(seq_btn, 115, 28);
-    lv_obj_set_style_bg_color(seq_btn,
-        lvl >= 2 ? lv_color_hex(0x388E3C) : lv_color_hex(0x555555), 0);
-    lv_obj_t *sb = lv_label_create(seq_btn);
-    lv_label_set_text(sb, lvl >= 2 ? "Sequence" : "Sequence (Lv2)");
-    lv_obj_center(sb);
 
-    // Gacha button (right column of the top row).
-    lv_obj_t *gacha_btn = lv_btn_create(root);
-    lv_obj_set_size(gacha_btn, 95, 36);
-    lv_obj_set_pos(gacha_btn, 220, 28);
-    lv_obj_set_style_bg_color(gacha_btn, lv_color_hex(0xC62828), 0);
-    lv_obj_t *gb = lv_label_create(gacha_btn);
-    lv_label_set_text(gb, "Gacha");
-    lv_obj_center(gb);
+    auto make_card = [&](int col, const char *label, uint32_t color,
+                         bool enabled,
+                         lv_obj_t *(*build_fn)(lv_obj_t *),
+                         void (*destroy_fn)(lv_obj_t *)) {
+        lv_obj_t *card = lv_btn_create(gctx->picker);
+        lv_obj_set_size(card, 95, 140);
+        lv_obj_set_pos(card, 12 + col * 102, 32);
+        lv_obj_set_style_bg_color(card, lv_color_hex(enabled ? color : 0x555555), 0);
 
-    s_game_host = lv_obj_create(root);
-    lv_obj_set_size(s_game_host, 320, 138);
-    lv_obj_set_pos(s_game_host, 0, 68);
-    lv_obj_set_style_bg_color(s_game_host, lv_color_black(), 0);
-    lv_obj_set_style_border_width(s_game_host, 0, 0);
-    lv_obj_set_style_pad_all(s_game_host, 0, 0);
+        lv_obj_t *name = lv_label_create(card);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(name, lv_color_white(), 0);
+        lv_label_set_text(name, label);
+        lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 8);
 
-    // The lambda captures `mount_game` by reference; since mount_game only
-    // touches file-scope statics this is safe.
-    lv_obj_add_event_cb(whack_btn, [](lv_event_t *e) {
-        extern lv_obj_t *(*get_mount_fn())(lv_obj_t *);
-        (void)e;
-        if (s_active_destroy && s_active_root) s_active_destroy(s_active_root);
-        s_active_destroy = pet::game_whack::destroy;
-        s_active_root = pet::game_whack::build(s_game_host);
-    }, LV_EVENT_CLICKED, nullptr);
+        if (!enabled) {
+            lv_obj_t *lock = lv_label_create(card);
+            lv_obj_set_style_text_font(lock, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(lock, lv_color_hex(0xDDDDDD), 0);
+            lv_label_set_text(lock, "Lv2+");
+            lv_obj_align(lock, LV_ALIGN_BOTTOM_MID, 0, -8);
+            return;
+        }
 
-    lv_obj_add_event_cb(seq_btn, [](lv_event_t *e) {
-        (void)e;
-        if (Pet::instance().get_state().level < 2) return;
-        if (s_active_destroy && s_active_root) s_active_destroy(s_active_root);
-        s_active_destroy = pet::game_sequence::destroy;
-        s_active_root = pet::game_sequence::build(s_game_host);
-    }, LV_EVENT_CLICKED, nullptr);
+        auto *cb = new CardCb { gctx, build_fn, destroy_fn };
+        lv_obj_add_event_cb(card, on_card_clicked, LV_EVENT_CLICKED, cb);
+        lv_obj_add_event_cb(card, on_card_freed, LV_EVENT_DELETE, cb);
+    };
 
-    lv_obj_add_event_cb(gacha_btn, [](lv_event_t *e) {
-        (void)e;
-        if (s_active_destroy && s_active_root) s_active_destroy(s_active_root);
-        s_active_destroy = pet::game_gacha::destroy;
-        s_active_root = pet::game_gacha::build(s_game_host);
-    }, LV_EVENT_CLICKED, nullptr);
+    make_card(0, "Whack",    0x1976D2, true,
+              pet::game_whack::build,    pet::game_whack::destroy);
+    make_card(1, "Sequence", 0x388E3C, lvl >= 2,
+              pet::game_sequence::build, pet::game_sequence::destroy);
+    make_card(2, "Gacha",    0xC62828, true,
+              pet::game_gacha::build,    pet::game_gacha::destroy);
 
-    lv_obj_add_event_cb(root, [](lv_event_t *e) {
-        (void)e;
-        if (s_active_destroy && s_active_root) s_active_destroy(s_active_root);
-        s_active_destroy = nullptr;
-        s_active_root = nullptr;
-        s_game_host = nullptr;
-    }, LV_EVENT_DELETE, nullptr);
+    // ---- Back overlay (hidden until play state) ----
+    gctx->back_btn = lv_btn_create(root);
+    lv_obj_set_size(gctx->back_btn, 56, 22);
+    lv_obj_set_pos(gctx->back_btn, 2, 2);
+    lv_obj_set_style_bg_color(gctx->back_btn, lv_color_hex(0x37474F), 0);
+    lv_obj_t *bl = lv_label_create(gctx->back_btn);
+    lv_label_set_text(bl, "< Back");
+    lv_obj_center(bl);
+    lv_obj_add_flag(gctx->back_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(gctx->back_btn, on_back_clicked, LV_EVENT_CLICKED, gctx);
 
     return root;
+}
+
+static void destroy_page_games(lv_obj_t *root)
+{
+    // The DELETE handler on root frees the GamesCtx. Nothing to do here.
+    (void)root;
 }
 
 static lv_obj_t *build_page_shop(lv_obj_t *parent)
@@ -354,7 +409,7 @@ static void build_ui()
 
     // Register page builders.
     pet::pages::register_page(pet::pages::Page::Status, build_page_status, destroy_page_status);
-    pet::pages::register_page(pet::pages::Page::Games,  build_page_games,  nullptr);
+    pet::pages::register_page(pet::pages::Page::Games,  build_page_games,  destroy_page_games);
     pet::pages::register_page(pet::pages::Page::Shop,   build_page_shop,   nullptr);
     pet::pages::register_page(pet::pages::Page::About,  build_page_about,  nullptr);
 
