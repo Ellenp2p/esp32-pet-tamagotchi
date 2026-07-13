@@ -6,27 +6,38 @@ namespace pet {
 
 static const char *TAG __attribute__((unused)) = "pet_state";
 
-// One level-up every 30 decay ticks = 30 * 10s = 5 minutes of game time.
+// One level-up every 30 decay ticks = 30 * 120s = 60 minutes of game time.
 // Tunable.
 static constexpr int kLevelTicks = 30;
 
-// Rate scaling: every decay step happens once every TICK_MS (10s), and each
-// numeric decrement has a 50% chance of being skipped. Effective per-second
-// rate at TICK_MS=10s and 50% skip:
-//   fullness  awake:  -2/10s * 50% = -0.10/s   (70 -> 20 in ~8 min,
-//                                                70 -> 0  in ~12 min)
-//   fullness  sleep:  -1/10s * 50% = -0.05/s   (sleep slows decay 2x)
-//   happiness awake:  -1/10s * 50% = -0.05/s
-//   energy    awake:  -1/10s * 50% = -0.05/s
-//   energy    sleep:  +5/10s * 50% = +0.25/s   (sleep recovers ~12 min full)
-//   health    sick:   -1/10s * 50% = -0.05/s
-//   health    heal:   +1/10s * 50% = +0.05/s
+// ============================================================================
+// Pacing model — all stats use a single 2-minute tick with 50% skip.
 //
-// Goal: pet only needs meaningful attention (Feed/Play/Sleep) once every
-// 30–60 minutes, not every minute. This keeps the "obligation to care"
-// sparse enough that the device can be left alone for hours without the
-// pet dying, while still feeling alive enough that stats visibly drift
-// during a normal session.
+//   TICK_MS = 120_000 ms (2 minutes per tick)
+//   per-tick Δ = -1 (or +1 for regen)  · 50% skip → average ±0.5 per tick
+//
+// Effective rates (per minute):
+//   fullness   awake -1*50%/2min = -0.25/min   → 100→0 in ~400 min (~6.7 h)
+//   fullness   sleep -1*50%/2min = -0.25/min   (same — sleep also slows via the
+//                                              ↓im_sick threshold, see below)
+//   happiness  awake -1*50%/2min = -0.25/min   (≈ 400 min full decay)
+//   energy     awake -1*50%/2min = -0.25/min
+//   energy     sleep +5*50%/2min = +1.25/min   (full recovery ≈ 80 min)
+//   health     sick   -1*50%/2min = -0.25/min
+//   health     heal   +1*50%/2min = +0.25/min  (full recovery ≈ 400 min)
+//
+// Bench targets:
+//   - Pet left alone from full stats can survive ~5 hours before any stat
+//     drops to the "sick" threshold (20% for fullness/happiness, 10% for
+//     energy). It reaches 0% only after ≈6–7 h.
+//   - Sleep roughly doubles recovery speed (energy regen is 5x faster
+//     while asleep).
+//   - Once sick, health drains at the same gentle 0.25/min rate, so the
+//     pet doesn't collapse instantly — but it WILL die if ignored for
+//     12+ hours total.
+//   - 1 Feed (+25 fullness) restores 100 min of "full" state. 1 Play
+//     gives +20 happiness but -10 fullness, -15 energy (a real cost).
+// ============================================================================
 static inline bool p50() { return (esp_random() & 1) == 0; }
 
 Pet &Pet::instance()
@@ -148,21 +159,21 @@ bool Pet::spend_coins(int amount)
 
 void Pet::decay_tick()
 {
-    // fullness drops over time; sleeping slows it down. 50% skip for halved rate.
-    int fullness_drop = sleeping_ ? 1 : 2;
-    if (p50()) fullness_ = clamp(fullness_ - fullness_drop);
+    // fullness drops slowly; sleeping doesn't slow it further (sleep only
+    // affects energy direction).
+    if (p50()) fullness_ = clamp(fullness_ - 1);
 
     int happiness_drop = sleeping_ ? 0 : 1;
     if (happiness_drop > 0 && p50()) happiness_ = clamp(happiness_ - happiness_drop);
 
-    // Energy: sleeping regenerates faster. Halve the delta via 50% chance.
+    // Energy: sleeping regenerates much faster than awake drains.
     if (sleeping_) {
         if (p50()) energy_ = clamp(energy_ + 5);
     } else {
         if (p50()) energy_ = clamp(energy_ - 1);
     }
 
-    // Health drops if neglected, otherwise slowly regenerates. Halved rate.
+    // Health drops if neglected, otherwise slowly regenerates.
     bool sick = (fullness_ < 20 || happiness_ < 20 || energy_ < 10);
     if (sick) {
         if (p50()) health_ = clamp(health_ - 1);
@@ -182,10 +193,9 @@ void Pet::update()
     TickType_t now = xTaskGetTickCount();
     uint32_t elapsed_ms = (now - last_update_tick_) * portTICK_PERIOD_MS;
 
-    // Decay every 10 seconds (combined with 50% skip in decay_tick this
-    // gives a per-second rate roughly 1/20 of the raw -2 base — i.e. on the
-    // order of minutes-to-hours for visible stat change).
-    const uint32_t TICK_MS = 10000;
+    // Decay every 2 minutes. With 50% skip this yields ~5–7 hour survival
+    // from full stats; see the pacing block at the top of this file.
+    const uint32_t TICK_MS = 120000;
     while (elapsed_ms >= TICK_MS) {
         decay_tick();
         elapsed_ms -= TICK_MS;

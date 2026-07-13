@@ -9,18 +9,20 @@ namespace idle_events {
 
 static const char *TAG = "idle";
 
-// Random interval between idle events, in ticks (100ms each).
-// 60s..120s => 600..1200 ticks.
+// Random interval between idle events, in ticks (1 decay-tick = 2 minutes).
+// 3..8 ticks => 6..16 minutes between rewards. Matches the slow pacing
+// (TICK_MS=120s): 1h of play yields ~4–10 idle events of 1–5 coins each
+// (4–50 coins/h), enough for ~2 Gacha pulls per hour.
 static int s_next_event_tick = 0;
 static int s_age_at_last_event = 0;
 
 void init()
 {
-    s_next_event_tick = 600 + (esp_random() % 600);
+    s_next_event_tick = 3 + (esp_random() % 6);  // 3..8 ticks = 6..16 min
     s_age_at_last_event = 0;
 }
 
-// Called from pet_task every 100ms with the current age_ticks (game seconds).
+// Called from pet_task every 100ms with the current age_ticks (decay ticks).
 void tick(int current_age_ticks)
 {
     if (s_age_at_last_event == 0) {
@@ -34,7 +36,7 @@ void tick(int current_age_ticks)
         Pet::instance().add_coins(reward);
         ESP_LOGI(TAG, "Idle event: pet found %d coins", reward);
         s_age_at_last_event = current_age_ticks;
-        s_next_event_tick = 600 + (esp_random() % 600);  // 60..120s
+        s_next_event_tick = 3 + (esp_random() % 6);  // 3..8 ticks
     }
 }
 
