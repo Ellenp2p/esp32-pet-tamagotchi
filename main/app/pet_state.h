@@ -29,6 +29,8 @@ public:
     // Actions
     void feed();           // +25 fullness, +5 energy, +5 happiness
     void feed_with_amount(int amount);  // shop-bought snack: amount=fullness delta
+    void drink_energy(int amount);     // shop-bought energy drink: amount=energy delta
+    void take_medicine(int amount);    // shop-bought medicine: amount=health delta
     void play();
     void sleep();
     void wake_up();

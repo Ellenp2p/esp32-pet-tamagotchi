@@ -23,7 +23,9 @@ static const char *TAG = "pet_ui";
 // Hand-rolled lv_image + lv_anim for full control over frame timing per state.
 static lv_obj_t *face_img_ = nullptr;
 static lv_anim_t face_anim_buf_;       // backing storage for the anim
-static lv_obj_t *status_label_ = nullptr;
+static lv_obj_t *status_label_ = nullptr;   // Line 1: "Awake | Lv3 | Sleeping"
+static lv_obj_t *stats_label_ = nullptr;   // Line 2: "F:88 Ha:75 E:62 He:90"
+static lv_obj_t *coins_label_ = nullptr;    // Line 3: "Coins: 42"
 static lv_obj_t *bars_[4] = {nullptr};
 static lv_obj_t *btn_sleep_ = nullptr;
 
@@ -159,11 +161,20 @@ static void update_ui()
         if (target != current_anim_) switch_to_animation(target);
     }
 
-    char status[96];
-    snprintf(status, sizeof(status), "%s | Lv%d | F:%d Ha:%d E:%d He:%d | Coins:%d",
-             sleeping ? "Sleeping" : "Awake",
-             s.level, s.fullness, s.happiness, s.energy, s.health, s.coins);
-    lv_label_set_text(status_label_, status);
+    // Three short labels stacked vertically instead of one wide row, so we
+    // never overflow the 212-px right column. Coins is shown on its own line
+    // with a "9999+" cap so the layout doesn't depend on the wallet size.
+    char line1[32], line2[64], line3[32];
+    snprintf(line1, sizeof(line1), "%s | Lv%d",
+             sleeping ? "Sleeping" : "Awake", s.level);
+    snprintf(line2, sizeof(line2), "F:%d Ha:%d E:%d He:%d",
+             s.fullness, s.happiness, s.energy, s.health);
+    int coins_disp = s.coins > 9999 ? 9999 : s.coins;
+    snprintf(line3, sizeof(line3), "Coins: %d%s",
+             coins_disp, s.coins > 9999 ? "+" : "");
+    lv_label_set_text(status_label_, line1);
+    lv_label_set_text(stats_label_, line2);
+    lv_label_set_text(coins_label_, line3);
 
     lv_label_set_text(lv_obj_get_child(btn_sleep_, 0), sleeping ? "Wake" : "Sleep");
 }
@@ -213,13 +224,27 @@ static lv_obj_t *build_page_status(lv_obj_t *parent)
     lv_obj_set_style_text_font(status_label_, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(status_label_, lv_color_white(), 0);
     lv_label_set_text(status_label_, "Initializing...");
-    lv_obj_align(status_label_, LV_ALIGN_TOP_LEFT, 108, 6);
+    lv_obj_align(status_label_, LV_ALIGN_TOP_LEFT, 108, 4);
+
+    // 4 stats on the next line (F / Ha / E / He).
+    stats_label_ = lv_label_create(root);
+    lv_obj_set_style_text_font(stats_label_, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(stats_label_, lv_color_white(), 0);
+    lv_label_set_text(stats_label_, "...");
+    lv_obj_align(stats_label_, LV_ALIGN_TOP_LEFT, 108, 20);
+
+    // Coins on its own line so a big number never clips out of the column.
+    coins_label_ = lv_label_create(root);
+    lv_obj_set_style_text_font(coins_label_, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(coins_label_, lv_color_hex(0xFFD54F), 0);  // amber
+    lv_label_set_text(coins_label_, "Coins: 0");
+    lv_obj_align(coins_label_, LV_ALIGN_TOP_LEFT, 108, 36);
 
     // 4 bars stacked tightly on the right side, below status label.
     for (int i = 0; i < 4; i++) {
         lv_obj_t *container = lv_obj_create(root);
         lv_obj_set_size(container, 208, 22);
-        lv_obj_align(container, LV_ALIGN_TOP_LEFT, 108, 28 + i * 24);
+        lv_obj_align(container, LV_ALIGN_TOP_LEFT, 108, 60 + i * 24);
         lv_obj_set_style_pad_all(container, 2, 0);
         lv_obj_set_style_bg_color(container, lv_color_hex(0x333333), 0);
         lv_obj_set_style_border_width(container, 0, 0);
@@ -431,7 +456,11 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
 
 static void destroy_page_games(lv_obj_t *root)
 {
-    (void)root;
+    if (!root) return;
+    // The LV_EVENT_DELETE handler on `root` calls `c->active_destroy` for
+    // the active game (which deletes its lv_timer_t*) and frees GamesCtx.
+    // lv_obj_del triggers that handler.
+    lv_obj_del(root);
 }
 
 static lv_obj_t *build_page_shop(lv_obj_t *parent)
@@ -446,21 +475,34 @@ static lv_obj_t *build_page_shop(lv_obj_t *parent)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_label_set_text(title, "Shop");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
-    struct Item { const char *name; int amount; int price; };
-    static const Item items[4] = {
-        {"Snack",   10, 10},
-        {"Meal",    25, 22},
-        {"Treat",   15, 18},
-        {"Feast",   50, 40},
+    struct Item {
+        const char *name;
+        const char *effect;  // shown on the card, e.g. "F+25  E+5"
+        int price;
+        lv_color_t tint;
+        void (*apply)(int amount);  // Pet method to call with `amount`
+        int amount;                // delta to pass to apply()
     };
-    for (int i = 0; i < 4; i++) {
-        int col = i % 2;
-        int row = i / 2;
+    static const Item items[6] = {
+        {"Snack",    "F+10",  8,  {}, [](int a){ Pet::instance().feed_with_amount(a); },   10},
+        {"Meal",     "F+25 E+5",  20, {}, [](int a){ Pet::instance().feed(); }, 0},
+        {"Feast",    "F+40",  35, {}, [](int a){ Pet::instance().feed_with_amount(a); },   40},
+        {"Coffee",   "E+30",  15, {}, [](int a){ Pet::instance().drink_energy(a); },      30},
+        {"Energy+",  "E+60",  28, {}, [](int a){ Pet::instance().drink_energy(a); },      60},
+        {"Medicine", "He+50", 25, {}, [](int a){ Pet::instance().take_medicine(a); },     50},
+    };
+
+    // 3 cols × 2 rows of 100x80 cards (320 - 6*pad = ~300 / 3 = 100 each).
+    const int card_w = 100, card_h = 80;
+    const int x0 = 6, y0 = 28, gx = 6, gy = 6;
+    for (int i = 0; i < 6; i++) {
+        int col = i % 3;
+        int row = i / 3;
         lv_obj_t *card = lv_button_create(root);
-        lv_obj_set_size(card, 140, 70);
-        lv_obj_set_pos(card, 15 + col * 150, 36 + row * 80);
+        lv_obj_set_size(card, card_w, card_h);
+        lv_obj_set_pos(card, x0 + col * (card_w + gx), y0 + row * (card_h + gy));
         lv_obj_set_style_bg_color(card, lv_color_hex(0x37474F), 0);
 
         lv_obj_t *name = lv_label_create(card);
@@ -469,19 +511,25 @@ static lv_obj_t *build_page_shop(lv_obj_t *parent)
         lv_label_set_text(name, items[i].name);
         lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 6);
 
-        lv_obj_t *stat = lv_label_create(card);
-        lv_obj_set_style_text_font(stat, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(stat, lv_color_hex(0xBBBBBB), 0);
-        char buf[32];
-        snprintf(buf, sizeof(buf), "F+%d  %d coins", items[i].amount, items[i].price);
-        lv_label_set_text(stat, buf);
-        lv_obj_align(stat, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lv_obj_t *effect = lv_label_create(card);
+        lv_obj_set_style_text_font(effect, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(effect, lv_color_hex(0xBBBBBB), 0);
+        lv_label_set_text(effect, items[i].effect);
+        lv_obj_align(effect, LV_ALIGN_CENTER, 0, 6);
+
+        lv_obj_t *price = lv_label_create(card);
+        lv_obj_set_style_text_font(price, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(price, lv_color_hex(0xFFD54F), 0);  // amber for coins
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%d coins", items[i].price);
+        lv_label_set_text(price, buf);
+        lv_obj_align(price, LV_ALIGN_BOTTOM_MID, 0, -6);
 
         lv_obj_add_event_cb(card, [](lv_event_t *e) {
             int idx = (int)(intptr_t)lv_event_get_user_data(e);
             const Item *it = &items[idx];
             if (Pet::instance().spend_coins(it->price)) {
-                Pet::instance().feed_with_amount(it->amount);
+                it->apply(it->amount);
                 ESP_LOGI(TAG, "Bought %s", it->name);
             } else {
                 ESP_LOGW(TAG, "Not enough coins for %s", it->name);

@@ -84,13 +84,19 @@ void switch_page(Page page)
         return;
     }
 
-    // Tear down current page.
-    if (s_handlers[(int)s_current].destroy && s_handlers[(int)s_current].root) {
-        s_handlers[(int)s_current].destroy(s_handlers[(int)s_current].root);
-    } else if (s_handlers[(int)s_current].root) {
-        lv_obj_del(s_handlers[(int)s_current].root);
+    // Tear down current page. Even if destroy() is a no-op stub, we must
+    // still call lv_obj_del() so the LV_EVENT_DELETE handler frees the
+    // GamesCtx and any timers the active game registered.
+    if (s_handlers[(int)s_current].root) {
+        lv_obj_t *root = s_handlers[(int)s_current].root;
+        if (s_handlers[(int)s_current].destroy) {
+            s_handlers[(int)s_current].destroy(root);
+        }
+        if (lv_obj_is_valid(root)) {
+            lv_obj_del(root);
+        }
+        s_handlers[(int)s_current].root = nullptr;
     }
-    s_handlers[(int)s_current].root = nullptr;
 
     // Build new page as child of content container.
     s_current = page;

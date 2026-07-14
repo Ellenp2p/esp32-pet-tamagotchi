@@ -101,6 +101,24 @@ void Pet::feed_with_amount(int amount)
     ESP_LOGI(TAG, "Ate snack (+%d fullness)", amount);
 }
 
+void Pet::drink_energy(int amount)
+{
+    if (amount <= 0) return;
+    energy_ = clamp(energy_ + amount);
+    happiness_ = clamp(happiness_ + 1);
+    dirty_ = true;
+    ESP_LOGI(TAG, "Drank energy (+%d)", amount);
+}
+
+void Pet::take_medicine(int amount)
+{
+    if (amount <= 0) return;
+    health_ = clamp(health_ + amount);
+    fullness_ = clamp(fullness_ - 2);  // medicine is bitter
+    dirty_ = true;
+    ESP_LOGI(TAG, "Took medicine (+%d health, -2 fullness)", amount);
+}
+
 void Pet::play()
 {
     if (sleeping_) {
