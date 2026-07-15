@@ -164,9 +164,11 @@ static void update_ui()
     // Three short labels stacked vertically instead of one wide row, so we
     // never overflow the 212-px right column. Coins is shown on its own line
     // with a "9999+" cap so the layout doesn't depend on the wallet size.
-    char line1[32], line2[64], line3[32];
-    snprintf(line1, sizeof(line1), "%s | Lv%d",
-             sleeping ? "Sleeping" : "Awake", s.level);
+    char line1[48], line2[64], line3[32];
+    // v0.6: status line shows the pet's life stage, not just "Awake".
+    // Tombstone is shown as "RIP" with the stage elapsed count.
+    const char *stg_name = pet::life_stage_name(Pet::instance().stage());
+    snprintf(line1, sizeof(line1), "%s | Lv%d", stg_name, s.level);
     snprintf(line2, sizeof(line2), "F:%d Ha:%d E:%d He:%d",
              s.fullness, s.happiness, s.energy, s.health);
     int coins_disp = s.coins > 9999 ? 9999 : s.coins;
@@ -404,6 +406,7 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
     int lvl = Pet::instance().get_state().level;
+    pet::LifeStage stg = Pet::instance().stage();
 
     auto make_card = [&](int col, const char *label, uint32_t color,
                          bool enabled,
@@ -434,11 +437,15 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
         lv_obj_add_event_cb(card, on_card_freed, LV_EVENT_DELETE, cb);
     };
 
-    make_card(0, "Whack",    0x1976D2, true,
+    // v0.6: gate games by LifeStage. Whack is always available (kids can
+    // play). Sequence unlocks at Child (~30 min). Gacha at Teen (~60 min).
+    // Tombstone disables all games.
+    bool tomb = (stg == pet::LifeStage::Tombstone);
+    make_card(0, "Whack",    0x1976D2, !tomb,
               pet::game_whack::build,    pet::game_whack::destroy);
-    make_card(1, "Sequence", 0x388E3C, lvl >= 2,
+    make_card(1, "Sequence", 0x388E3C, !tomb && (int)stg >= (int)pet::LifeStage::Child,
               pet::game_sequence::build, pet::game_sequence::destroy);
-    make_card(2, "Gacha",    0xC62828, true,
+    make_card(2, "Gacha",    0xC62828, !tomb && (int)stg >= (int)pet::LifeStage::Teen,
               pet::game_gacha::build,    pet::game_gacha::destroy);
 
     gctx->back_btn = lv_button_create(root);

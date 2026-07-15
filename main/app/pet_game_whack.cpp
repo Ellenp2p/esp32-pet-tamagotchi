@@ -76,6 +76,10 @@ static void next_round(lv_timer_t *t)
             snprintf(buf, sizeof(buf), "Game over! Score:%d/%d", s_ctx.score, kRounds);
             set_info(buf);
             set_hint("Press Start");
+            // v0.6: stat cost. 5 rounds of whacking = -5 F, -10 E, +5 Ha, +5c/hit.
+            // reward=score*5, stat ha=+5 (per game), cost=score (per hit pair).
+            Pet::instance().work_outcome("ha", 5, 0);
+            Pet::instance().work_outcome("",   0, s_ctx.score * 5);
             if (s_ctx.start_btn) lv_obj_clear_state(s_ctx.start_btn, LV_STATE_DISABLED);
             lv_timer_pause(s_ctx.timer);
             return;
@@ -115,6 +119,8 @@ static void hole_click_cb(lv_event_t *e)
     char buf[40];
     snprintf(buf, sizeof(buf), "Hit! +%d", kReward);
     set_hint(buf);
+    // v0.6: per-hit energy cost (small but adds up over 5 rounds).
+    Pet::instance().work_outcome("e", -2, 0);
     Pet::instance().add_coins(kReward);
     lv_timer_set_period(s_ctx.timer, kGapMs);
 }

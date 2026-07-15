@@ -59,7 +59,10 @@ static void tile_cb(lv_event_t *e)
     lv_obj_set_style_bg_color(s_ctx.tiles[tile_idx], lv_color_hex(0x43A047), 0);  // green
     s_ctx.next_expected++;
     if (s_ctx.next_expected > kTiles) {
-        // Win!
+        // Win! v0.6: stat cost. Sequence Tap is mental — costs energy,
+        // gives happiness back.
+        Pet::instance().work_outcome("e",  -15, 0);
+        Pet::instance().work_outcome("ha", +10, 0);
         Pet::instance().add_coins(kReward);
         char buf[32];
         snprintf(buf, sizeof(buf), "Cleared! +%d", kReward);
