@@ -6,6 +6,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 
@@ -39,6 +40,14 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+        // v0.6: kick off SNTP once we have an IP. The NTP sync lets
+        // PetMeta::check_streak() compute a real "today" day. If SNTP
+        // fails, PetMeta skips — no streak change, no false reset.
+        esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, "pool.ntp.org");
+        esp_sntp_init();
+        ESP_LOGI(TAG, "SNTP init requested (server: pool.ntp.org)");
     }
 }
 

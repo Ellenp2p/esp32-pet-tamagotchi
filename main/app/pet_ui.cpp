@@ -1,6 +1,7 @@
 #include "pet_ui.h"
 #include "pet_state.h"
 #include "pet_save.h"
+#include "pet_meta.h"
 #include "pet_pages.h"
 #include "pet_game_whack.h"
 #include "pet_game_sequence.h"
@@ -622,6 +623,16 @@ esp_err_t start_ui()
     Pet::instance().init();
     pet::save::init();
     pet::save::load(Pet::instance());
+
+    // v0.6: check daily streak once the system time is stable. If NTP
+    // hasn't synced yet (no WiFi, or first boot), today_epoch_day() returns
+    // 0 and meta::record_open_day_and_reward() short-circuits.
+    int streak = pet::meta::record_open_day_and_reward(
+        pet::meta::today_epoch_day());
+    if (streak >= 1) {
+        ESP_LOGI(TAG, "Daily streak active: %d days, +%d coins",
+                 streak, streak * 10);
+    }
 
     xTaskCreate(pet_task, "pet_task", 4096, nullptr, 5, nullptr);
 
