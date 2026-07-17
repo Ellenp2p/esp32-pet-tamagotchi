@@ -49,4 +49,10 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password);
 esp_err_t wifi_manager_disconnect();
 esp_err_t wifi_manager_forget();  // erase the saved NVS credentials
 
+// Read the currently-cached NVS credentials so the UI can pre-fill the
+// password field for the previously-connected SSID. Buffers must hold
+// 33 and 64 bytes respectively. Returns true if any SSID is cached.
+bool wifi_manager_get_saved_credentials(char *out_ssid, size_t ssid_sz,
+                                        char *out_pass, size_t pass_sz);
+
 } // namespace app

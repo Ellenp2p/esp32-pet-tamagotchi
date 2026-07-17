@@ -135,10 +135,23 @@ static void event_handler(void *arg, esp_event_base_t event_base,
 
         // v0.6: kick off SNTP once we have an IP. If SNTP fails, PetMeta
         // skips — no streak change, no false reset.
-        esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-        esp_sntp_setservername(0, "pool.ntp.org");
-        esp_sntp_init();
-        ESP_LOGI(TAG, "SNTP init requested (server: pool.ntp.org)");
+        // v0.6.6 fix: SNTP can only be init'd once. Re-entering the
+        // event after a disconnect/reconnect (or a second manual
+        // Connect) would call esp_sntp_setoperatingmode() while the
+        // client is still running and trip an lwip assertion that
+        // abort()s the entire app. Skip the init path on subsequent
+        // GOT_IP events — the server name + operatingmode already
+        // survive in the LWIP SNTP module.
+        static bool s_sntp_inited = false;
+        if (!s_sntp_inited) {
+            esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0, "pool.ntp.org");
+            esp_sntp_init();
+            s_sntp_inited = true;
+            ESP_LOGI(TAG, "SNTP init requested (server: pool.ntp.org)");
+        } else {
+            ESP_LOGI(TAG, "SNTP already running; skipping re-init");
+        }
         post_event(WIFI_CONN_CONNECTED, s_status.ssid, s_status.ip, s_status.rssi);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_SCAN_DONE) {
         // esp_wifi_scan_get_ap_records fills `s_scan` with up to MAX_APS.
@@ -150,6 +163,12 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         }
         s_scan_inflight.store(false);
         ESP_LOGI(TAG, "Scan done, %d APs", s_scan_count);
+        // v0.6.6 fix: SCAN_DONE must return s_status.state to IDLE so the
+        // UI poll can detect the SCANNING->IDLE transition and rebuild
+        // the AP list. Without this the state stays SCANNING forever.
+        if (s_status.state == WIFI_CONN_SCANNING) {
+            s_status.state = WIFI_CONN_IDLE;
+        }
         post_event(WIFI_CONN_IDLE, nullptr, nullptr, 0);  // re-arms UI refresh
     }
 }
@@ -168,20 +187,35 @@ static void do_connect_locked(const char *ssid, const char *pass)
     strncpy(reinterpret_cast<char *>(cfg.sta.ssid), ssid, sizeof(cfg.sta.ssid) - 1);
     strncpy(reinterpret_cast<char *>(cfg.sta.password), pass, sizeof(cfg.sta.password) - 1);
     cfg.sta.threshold.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+    // PMF required=false: the AP on this user's network doesn't advertise
+    // PMF capability (NEWCJIA-8925), and the driver rejects the profile
+    // outright ("AP not PMF Capable when STA requires, reject profile").
+    // The pm stop / state run->init disconnect bug is independent of PMF
+    // and is addressed by re-asserting WIFI_PS_NONE before connect.
     cfg.sta.pmf_cfg.capable    = true;
     cfg.sta.pmf_cfg.required   = false;
     cfg.sta.scan_method        = WIFI_ALL_CHANNEL_SCAN;
 
+    // v0.6.6 fix: explicitly disconnect before set_config+connect so the
+    // driver's internal state machine resets. Without this, a wrong
+    // password that left the driver mid-retry causes subsequent scan
+    // calls to be silently dropped (busy) and the user appears stuck.
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     set_status_ssid(ssid);
     s_status.state = WIFI_CONN_CONNECTING;
+    // Disable PS before connect too — driver may flip it on implicitly.
+    esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_connect();
     ESP_LOGI(TAG, "Connect requested: ssid=%s", ssid);
 
-    // Wait up to 30 s for IP_EVENT_STA_GOT_IP or fail.
+    // Wait up to 12 s for IP_EVENT_STA_GOT_IP or fail. Bad-password
+    // retires settle within ~10 s on stock ESP-IDF; longer would
+    // hold the worker hostage and starve subsequent scan requests.
     EventBits_t bits = xEventGroupWaitBits(
         s_events, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-        pdTRUE, pdFALSE, pdMS_TO_TICKS(30000));
+        pdTRUE, pdFALSE, pdMS_TO_TICKS(12000));
 
     if (bits & WIFI_FAIL_BIT) {
         s_status.state = WIFI_CONN_FAILED;
@@ -193,6 +227,11 @@ static void do_connect_locked(const char *ssid, const char *pass)
         s_status.state = WIFI_CONN_FAILED;
         ESP_LOGW(TAG, "Connect to %s timed out", ssid);
     }
+    // v0.6.6 fix: do NOT call esp_wifi_disconnect() here. Doing so after
+    // a successful connect forces the driver back into the auth/assoc
+    // state machine and re-triggers the "state: run -> init" 10 ms
+    // DISASSOC race that shows up as reason=8 in the log. The next
+    // scan cmd path already force-disconnects if needed.
     post_event(s_status.state, ssid, s_status.ip, 0);
 }
 
@@ -215,9 +254,10 @@ static void wifi_task(void *arg)
                                         &event_handler, nullptr, &inst_any);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                         &event_handler, nullptr, &inst_got_ip);
-    // Also register SCAN_DONE handler.
-    esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
-                                        &event_handler, nullptr, nullptr);
+    // SCAN_DONE is covered by the ESP_EVENT_ANY_ID registration above —
+    // do not register it again or event_handler() will fire twice and
+    // the second call to esp_wifi_scan_get_ap_records() returns 0 and
+    // overwrites s_scan_count with zero. (Verified on the v0.6.6 build.)
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mode(WIFI_MODE_STA));
 
@@ -235,7 +275,18 @@ static void wifi_task(void *arg)
              esp_err_to_name(cc_err));
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_start());
+    // v0.6.6 fix: ESP-IDF v6.0.2 + ESP32-S3 rev 0.2 has a known issue
+    // where the driver kicks the AP into "pm stop" ~10 ms after DHCP
+    // completes and then DISASSOCs the STA with reason=8. Symptom:
+    //   Got IP: 192.168.1.12
+    //   pm stop, total sleep time: 0 us
+    //   Disconnected from AP, reason=8, rssi=-46
+    // The workaround is to keep power save disabled at the driver level
+    // — esp_wifi_set_ps(WIFI_PS_NONE) must be reasserted after every
+    // reconnect, since the driver silently flips it back to MIN_MODEM
+    // during connect.
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+    esp_wifi_set_ps(WIFI_PS_NONE);  // re-assert: belt-and-braces
 
     // Initial status: not connected.
     s_status.state = WIFI_CONN_IDLE;
@@ -264,6 +315,17 @@ static void wifi_task(void *arg)
                 if (s_scan_inflight.load()) {
                     ESP_LOGW(TAG, "Scan already in flight; ignoring");
                     continue;
+                }
+                // v0.6.6 fix: a bad-password connect can leave the
+                // driver mid-retry even after our event_handler marks
+                // FAILED. Calling esp_wifi_disconnect() here guarantees
+                // a clean IDLE state so the scan call below doesn't
+                // bounce back as ESP_ERR_WIFI_STATE.
+                if (s_status.state == WIFI_CONN_CONNECTING ||
+                    s_status.state == WIFI_CONN_FAILED) {
+                    ESP_LOGW(TAG, "Force-disconnecting before scan");
+                    esp_wifi_disconnect();
+                    vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 s_scan_inflight.store(true);
                 s_status.state = WIFI_CONN_SCANNING;
@@ -368,6 +430,22 @@ esp_err_t wifi_manager_forget()
     s_nvs_ssid[0] = 0;
     s_nvs_password[0] = 0;
     return err;
+}
+
+bool wifi_manager_get_saved_credentials(char *out_ssid, size_t ssid_sz,
+                                        char *out_pass, size_t pass_sz)
+{
+    if (!out_ssid || !out_pass || ssid_sz == 0 || pass_sz == 0) return false;
+    if (!s_nvs_loaded || s_nvs_ssid[0] == 0) {
+        out_ssid[0] = 0;
+        out_pass[0] = 0;
+        return false;
+    }
+    strncpy(out_ssid, s_nvs_ssid, ssid_sz - 1);
+    out_ssid[ssid_sz - 1] = 0;
+    strncpy(out_pass, s_nvs_password, pass_sz - 1);
+    out_pass[pass_sz - 1] = 0;
+    return true;
 }
 
 } // namespace app

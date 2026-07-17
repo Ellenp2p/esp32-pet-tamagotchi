@@ -28,6 +28,7 @@ static lv_anim_t face_anim_buf_;       // backing storage for the anim
 static lv_obj_t *status_label_ = nullptr;   // Line 1: "Awake | Lv3 | Sleeping"
 static lv_obj_t *stats_label_ = nullptr;   // Line 2: "F:88 Ha:75 E:62 He:90"
 static lv_obj_t *coins_label_ = nullptr;    // Line 3: "Coins: 42"
+static lv_obj_t *wifi_label_ = nullptr;     // Top-right WiFi status indicator
 static lv_obj_t *bars_[4] = {nullptr};
 static lv_obj_t *btn_sleep_ = nullptr;
 
@@ -180,6 +181,47 @@ static void update_ui()
     lv_label_set_text(stats_label_, line2);
     lv_label_set_text(coins_label_, line3);
 
+    // v0.6.6: top-right WiFi indicator. Color cues:
+    //   CONNECTED   -> green  "WiFi:SSID"
+    //   CONNECTING  -> amber  "WiFi:..."
+    //   SCANNING    -> amber  "WiFi:scan"
+    //   FAILED      -> red    "WiFi:!"
+    //   IDLE/DISCON -> grey   "WiFi:--"
+    if (wifi_label_) {
+        app::wifi_status ws;
+        app::wifi_manager_get_status(&ws);
+        char wbuf[40];
+        const char *color_hex = "90A4AE";  // dim grey
+        switch (ws.state) {
+            case app::WIFI_CONN_CONNECTED:
+                snprintf(wbuf, sizeof(wbuf), "WiFi:%s", ws.ssid);
+                color_hex = "66BB6A";  // green
+                break;
+            case app::WIFI_CONN_CONNECTING:
+                snprintf(wbuf, sizeof(wbuf), "WiFi:...");
+                color_hex = "FFD54F";  // amber
+                break;
+            case app::WIFI_CONN_SCANNING:
+                snprintf(wbuf, sizeof(wbuf), "WiFi:scan");
+                color_hex = "FFD54F";
+                break;
+            case app::WIFI_CONN_FAILED:
+                snprintf(wbuf, sizeof(wbuf), "WiFi:!");
+                color_hex = "EF5350";  // red
+                break;
+            case app::WIFI_CONN_DISCONNECTED:
+            case app::WIFI_CONN_IDLE:
+            default:
+                snprintf(wbuf, sizeof(wbuf), "WiFi:--");
+                color_hex = "90A4AE";  // grey
+                break;
+        }
+        lv_label_set_text(wifi_label_, wbuf);
+        lv_obj_set_style_text_color(wifi_label_,
+                                    lv_color_hex(strtoul(color_hex, nullptr, 16)),
+                                    0);
+    }
+
     lv_label_set_text(lv_obj_get_child(btn_sleep_, 0), sleeping ? "Wake" : "Sleep");
 }
 
@@ -229,6 +271,14 @@ static lv_obj_t *build_page_status(lv_obj_t *parent)
     lv_obj_set_style_text_color(status_label_, lv_color_white(), 0);
     lv_label_set_text(status_label_, "Initializing...");
     lv_obj_align(status_label_, LV_ALIGN_TOP_LEFT, 108, 4);
+
+    // Top-right WiFi indicator — small badge showing connection state.
+    // Updated by pet_task from wifi_manager_get_status().
+    wifi_label_ = lv_label_create(root);
+    lv_obj_set_style_text_font(wifi_label_, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(wifi_label_, lv_color_hex(0x90A4AE), 0);  // dim grey
+    lv_label_set_text(wifi_label_, "[WiFi: --]");
+    lv_obj_align(wifi_label_, LV_ALIGN_TOP_RIGHT, -2, 4);
 
     // 4 stats on the next line (F / Ha / E / He).
     stats_label_ = lv_label_create(root);
@@ -294,6 +344,7 @@ static void destroy_page_status(lv_obj_t *root)
     lv_anim_del(face_img_, nullptr);
     face_img_ = nullptr;
     status_label_ = nullptr;
+    wifi_label_ = nullptr;
     btn_sleep_ = nullptr;
     for (int i = 0; i < 4; i++) bars_[i] = nullptr;
     action_animation_active_ = false;
@@ -558,6 +609,7 @@ struct SettingsCtx {
     // Password popup state — created on demand when an AP is selected.
     lv_obj_t *pass_popup  = nullptr;
     lv_obj_t *pass_ta     = nullptr;
+    lv_obj_t *pass_kb     = nullptr;
     char      pass_ssid[33] = {};
 };
 static SettingsCtx s_settings;
@@ -571,10 +623,23 @@ static void refresh_settings_status();
 
 // One-shot lvgl timer that polls wifi_manager state and refreshes the UI.
 static lv_timer_t *s_settings_poll = nullptr;
+static int s_last_state = -1;
+static void rebuild_ap_list();
+
 static void settings_poll_cb(lv_timer_t *t)
 {
     (void)t;
     refresh_settings_status();
+    app::wifi_status st;
+    app::wifi_manager_get_status(&st);
+    // v0.6.6 fix: rebuild the AP list whenever SCAN_DONE transitions us
+    // out of SCANNING. The list is built once at page entry; without this
+    // the user is stuck on "(no scan results)" even though s_scan_count>0.
+    if (s_last_state == app::WIFI_CONN_SCANNING &&
+        st.state != app::WIFI_CONN_SCANNING) {
+        rebuild_ap_list();
+    }
+    s_last_state = st.state;
 }
 
 static void refresh_settings_status()
@@ -615,13 +680,38 @@ static void rebuild_ap_list()
         char label[64];
         bool connected = (strncmp((char *)aps[i].ssid, st.ssid,
                                   sizeof(aps[i].ssid)) == 0);
-        // Lock icon: '*' (open) or '#' (WPA) — esp_wifi passes a bit in
-        // ap_info.authmode. We just use a single character.
+        // Lock char: "" (open) or "#" (WPA).
         const char *lock = (aps[i].authmode == WIFI_AUTH_OPEN) ? "" : "#";
-        snprintf(label, sizeof(label), "%s%-30.30s  %ddBm%s",
+        // v0.6.6 visual: convert RSSI dBm into a 0..4 bar ASCII gauge.
+        // All chars are basic ASCII so they are guaranteed in the
+        // montserrat_12 subset that the list buttons use. Each filled
+        // bar is one `|` plus a space separator, empty bars are three
+        // spaces so each bar slot is 3 columns wide; total gauge width
+        // is always 12 columns regardless of strength.
+        //   >= -55  ->  4 bars "|||          "  (excellent)
+        //   >= -67  ->  3 bars  "|||          -" reduce to " |||       "
+        //   >= -75  ->  2 bars  "  ||        "
+        //   >= -82  ->  1 bar   "   |        "
+        //   <  -82  ->  0 bars  "            "
+        int rssi = aps[i].rssi;
+        int bars;
+        if      (rssi >= -55) bars = 4;
+        else if (rssi >= -67) bars = 3;
+        else if (rssi >= -75) bars = 2;
+        else if (rssi >= -82) bars = 1;
+        else                  bars = 0;
+        char bar_chars[13];
+        // Each bar = "|  " (3 chars wide); 4 slots = 12 chars total.
+        for (int b = 0; b < 4; b++) {
+            bar_chars[b * 3 + 0] = (b < bars) ? '|' : ' ';
+            bar_chars[b * 3 + 1] = ' ';
+            bar_chars[b * 3 + 2] = ' ';
+        }
+        bar_chars[12] = 0;
+        snprintf(label, sizeof(label), "%s%-20.20s%s%s",
                  connected ? "*" : " ",
                  (char *)aps[i].ssid,
-                 (int)aps[i].rssi,
+                 bar_chars,
                  lock);
         lv_obj_t *btn = lv_list_add_button(s_settings.list, NULL, label);
         // Allocate a heap copy of the SSID so the click handler can read it.
@@ -669,6 +759,10 @@ static void on_forget_clicked(lv_event_t *e)
 
 static void close_pass_popup()
 {
+    if (s_settings.pass_kb) {
+        lv_obj_del(s_settings.pass_kb);
+        s_settings.pass_kb = nullptr;
+    }
     if (s_settings.pass_popup) {
         lv_obj_del(s_settings.pass_popup);
         s_settings.pass_popup = nullptr;
@@ -680,14 +774,24 @@ static void close_pass_popup()
 static void on_connect_clicked(lv_event_t *e)
 {
     (void)e;
-    if (!s_settings.pass_ta) return;
-    const char *pass = lv_textarea_get_text(s_settings.pass_ta);
-    if (!pass) pass = "";
-    if (s_settings.pass_ssid[0] == 0) {
+    ESP_LOGI("pet_ui", "Connect CLICK, ta=%p", (void *)s_settings.pass_ta);
+    if (!s_settings.pass_ta) {
+        ESP_LOGW("pet_ui", "Connect: ta is null");
         close_pass_popup();
         return;
     }
-    app::wifi_manager_connect(s_settings.pass_ssid, pass);
+    const char *pass = lv_textarea_get_text(s_settings.pass_ta);
+    if (!pass) pass = "";
+    ESP_LOGI("pet_ui", "Connect: ssid='%s' pass_len=%d",
+             s_settings.pass_ssid, (int)strlen(pass));
+    if (s_settings.pass_ssid[0] == 0) {
+        ESP_LOGW("pet_ui", "Connect: ssid empty");
+        close_pass_popup();
+        return;
+    }
+    esp_err_t rc = app::wifi_manager_connect(s_settings.pass_ssid, pass);
+    ESP_LOGI("pet_ui", "wifi_manager_connect rc=%s",
+             esp_err_to_name(rc));
     close_pass_popup();
     refresh_settings_status();
 }
@@ -716,23 +820,61 @@ static void on_ap_clicked(lv_event_t *e)
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
 
     lv_obj_t *ta = lv_textarea_create(popup);
-    lv_obj_set_size(ta, 260, 32);
-    lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_set_size(ta, 230, 32);
+    lv_obj_align(ta, LV_ALIGN_TOP_MID, -16, 30);
     lv_textarea_set_password_mode(ta, true);
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_placeholder_text(ta, "password");
+
+    // v0.6.6: pre-fill the textarea with the cached NVS password if the
+    // user is editing the previously-saved SSID. Other APs leave the
+    // field blank.
+    char saved_ssid[33] = {};
+    char saved_pass[64] = {};
+    if (app::wifi_manager_get_saved_credentials(saved_ssid, sizeof(saved_ssid),
+                                                saved_pass, sizeof(saved_pass))
+        && strcmp(saved_ssid, ssid) == 0
+        && saved_pass[0] != 0) {
+        lv_textarea_set_text(ta, saved_pass);
+    }
+
+    // v0.6.6: Show/Hide button next to the password field. Toggle the
+    // textarea's password_mode flag.
+    lv_obj_t *show_btn = lv_button_create(popup);
+    lv_obj_set_size(show_btn, 32, 32);
+    lv_obj_align(show_btn, LV_ALIGN_TOP_RIGHT, -2, 30);
+    lv_obj_t *show_lbl = lv_label_create(show_btn);
+    lv_label_set_text(show_lbl, "*");
+    lv_obj_center(show_lbl);
+    lv_obj_add_event_cb(show_btn, [](lv_event_t *ev) {
+        lv_obj_t *btn = (lv_obj_t *)lv_event_get_current_target(ev);
+        lv_obj_t *label = (lv_obj_t *)lv_obj_get_child(btn, 0);
+        if (!s_settings.pass_ta || !label) return;
+        bool now_hidden = !lv_textarea_get_password_mode(s_settings.pass_ta);
+        lv_textarea_set_password_mode(s_settings.pass_ta, now_hidden);
+        lv_label_set_text(label, now_hidden ? "*" : "o");
+    }, LV_EVENT_CLICKED, nullptr);
+
     // Open the keyboard so the user can type immediately.
     lv_obj_t *kb = lv_keyboard_create(lv_scr_act());
     lv_keyboard_set_textarea(kb, ta);
     lv_obj_set_style_bg_opa(kb, LV_OPA_90, 0);
     lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_size(kb, 320, 110);
+    // v0.6.6 fix: tapping the keyboard's "OK" (✓) button only emits
+    // LV_EVENT_READY — the keyboard widget does not delete itself.
+    // Without this handler the keyboard stays on screen after the user
+    // confirms, blocking everything else. Delete it here; the popup
+    // stays open so the user can still tap Cancel/Connect.
     lv_obj_add_event_cb(kb, [](lv_event_t *ev) {
-        // Hide keyboard but keep popup open.
-        lv_obj_add_flag((lv_obj_t *)lv_event_get_current_target(ev),
-                        LV_OBJ_FLAG_HIDDEN);
-    }, LV_EVENT_DEFOCUSED, nullptr);
-
+        lv_obj_t *kbd = (lv_obj_t *)lv_event_get_current_target(ev);
+        if (lv_obj_is_valid(kbd)) {
+            lv_obj_del(kbd);
+        }
+        if (s_settings.pass_kb == kbd) {
+            s_settings.pass_kb = nullptr;
+        }
+    }, LV_EVENT_READY, nullptr);
     lv_obj_t *cancel_btn = lv_button_create(popup);
     lv_obj_set_size(cancel_btn, 100, 30);
     lv_obj_align(cancel_btn, LV_ALIGN_BOTTOM_LEFT, 8, -4);
@@ -754,6 +896,7 @@ static void on_ap_clicked(lv_event_t *e)
 
     s_settings.pass_popup = popup;
     s_settings.pass_ta    = ta;
+    s_settings.pass_kb    = kb;
 }
 
 static lv_obj_t *build_page_settings(lv_obj_t *parent)

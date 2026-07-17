@@ -18,6 +18,12 @@ sdkconfig.local
 .idea/
 *.swp
 *.swo
+
+# --- Ad-hoc monitor / build / flash logs (kept locally for debug) ---
+build.log
+flash.log
+mon*.log
+mon*.err
 .DS_Store
 Thumbs.db
 
