@@ -876,6 +876,14 @@ static void pet_task(void *arg)
 
 esp_err_t start_ui()
 {
+    // v0.6.6: bring up the Wi-Fi subsystem as early as possible so the
+    // command queue exists by the time the Settings page appears. The
+    // worker task initialises esp_netif / esp_wifi in STA mode and (if
+    // NVS has saved credentials) kicks off the auto-connect on its own
+    // thread. We deliberately call it before building the LVGL UI so
+    // the first scan/connect doesn't stall the boot sequence.
+    app::wifi_manager_init();
+
     if (lvgl_port_lock(0)) {
         build_ui();
         lvgl_port_unlock();

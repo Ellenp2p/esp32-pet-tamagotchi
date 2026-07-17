@@ -220,6 +220,20 @@ static void wifi_task(void *arg)
                                         &event_handler, nullptr, nullptr);
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    // v0.6.6 fix: STA-only mode requires an explicit country before
+    // esp_wifi_scan_start() will broadcast probe requests. Without this
+    // the scan call returns ESP_OK but never produces a SCAN_DONE event
+    // and the AP list stays empty indefinitely.
+    wifi_country_t cc = {};
+    cc.cc[0] = 'C'; cc.cc[1] = 'N'; cc.cc[2] = 0;
+    cc.schan = 1;
+    cc.nchan = 13;
+    cc.policy = WIFI_COUNTRY_POLICY_AUTO;
+    esp_err_t cc_err = esp_wifi_set_country(&cc);
+    ESP_LOGI(TAG, "esp_wifi_set_country(CN) returned %s",
+             esp_err_to_name(cc_err));
+
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
 
@@ -256,13 +270,14 @@ static void wifi_task(void *arg)
                 wifi_scan_config_t sc = {};
                 sc.show_hidden = false;
                 sc.scan_type   = WIFI_SCAN_TYPE_ACTIVE;
-                sc.scan_time.active.min = 100;
-                sc.scan_time.active.max = 300;
+                // scan_time 0 = "use driver default minimal dwell" which
+                // is what every ESP-IDF example uses.
                 esp_err_t err = esp_wifi_scan_start(&sc, false);
                 if (err != ESP_OK) {
                     s_scan_inflight.store(false);
                     s_status.state = WIFI_CONN_IDLE;
-                    ESP_LOGE(TAG, "esp_wifi_scan_start: %s", esp_err_to_name(err));
+                    ESP_LOGE(TAG, "esp_wifi_scan_start: %s",
+                             esp_err_to_name(err));
                 }
             } else if (cmd.kind == 1) {
                 // Persist + connect.
