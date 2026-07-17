@@ -10,7 +10,7 @@ enum class Page {
     Status = 0,
     Games,
     Shop,
-    About,
+    Settings,
     Count,
 };
 

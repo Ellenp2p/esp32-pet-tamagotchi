@@ -9,6 +9,7 @@
 #include "pet_frames.h"
 #include "pet_idle_events.h"
 #include "app/ble_pet.h"
+#include "app/wifi_manager.h"
 #include "bsp/bsp_qmi8658.h"
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
@@ -547,10 +548,273 @@ static lv_obj_t *build_page_shop(lv_obj_t *parent)
     return root;
 }
 
-static lv_obj_t *build_page_about(lv_obj_t *parent)
+// v0.6.6: WiFi settings page. Layout (320x208):
+//   y=0..32   status bar  (SSID / state / IP)
+//   y=36..56  "Rescan" + "Forget" + "Disconnect" buttons
+//   y=60..208 AP list  (each item: SSID, lock icon, RSSI, "*" if connected)
+struct SettingsCtx {
+    lv_obj_t *status_label = nullptr;
+    lv_obj_t *list        = nullptr;
+    // Password popup state — created on demand when an AP is selected.
+    lv_obj_t *pass_popup  = nullptr;
+    lv_obj_t *pass_ta     = nullptr;
+    char      pass_ssid[33] = {};
+};
+static SettingsCtx s_settings;
+
+// Forward decls for the per-AP list-button handler.
+static void on_ap_clicked(lv_event_t *e);
+static void on_rescan_clicked(lv_event_t *e);
+static void on_disconnect_clicked(lv_event_t *e);
+static void on_forget_clicked(lv_event_t *e);
+static void refresh_settings_status();
+
+// One-shot lvgl timer that polls wifi_manager state and refreshes the UI.
+static lv_timer_t *s_settings_poll = nullptr;
+static void settings_poll_cb(lv_timer_t *t)
 {
-    return build_page_placeholder(parent, "About",
-        "ESP32-S3 Pet v0.4.0\nLVGL 9.4 + NimBLE\nFS:BSD Pet Project");
+    (void)t;
+    refresh_settings_status();
+}
+
+static void refresh_settings_status()
+{
+    if (!s_settings.status_label) return;
+    app::wifi_status st;
+    app::wifi_manager_get_status(&st);
+    const char *state_str = "?";
+    switch (st.state) {
+        case app::WIFI_CONN_IDLE:        state_str = "Idle";        break;
+        case app::WIFI_CONN_SCANNING:    state_str = "Scanning";    break;
+        case app::WIFI_CONN_CONNECTING:  state_str = "Connecting";  break;
+        case app::WIFI_CONN_CONNECTED:   state_str = "Connected";   break;
+        case app::WIFI_CONN_FAILED:      state_str = "Failed";      break;
+        case app::WIFI_CONN_DISCONNECTED: state_str = "Disconnected"; break;
+    }
+    char buf[96];
+    if (st.ssid[0] == 0) {
+        snprintf(buf, sizeof(buf), "WiFi: %s", state_str);
+    } else {
+        snprintf(buf, sizeof(buf), "WiFi: %s  %s  %s",
+                 st.ssid, state_str, st.ip);
+    }
+    lv_label_set_text(s_settings.status_label, buf);
+}
+
+static void rebuild_ap_list()
+{
+    if (!s_settings.list) return;
+    lv_obj_clean(s_settings.list);
+    int n = app::wifi_manager_scan_count();
+    const wifi_ap_record_t *aps = app::wifi_manager_scan_results();
+    app::wifi_status st;
+    app::wifi_manager_get_status(&st);
+    for (int i = 0; i < n; i++) {
+        // Skip hidden / empty SSIDs.
+        if (aps[i].ssid[0] == 0) continue;
+        char label[64];
+        bool connected = (strncmp((char *)aps[i].ssid, st.ssid,
+                                  sizeof(aps[i].ssid)) == 0);
+        // Lock icon: '*' (open) or '#' (WPA) — esp_wifi passes a bit in
+        // ap_info.authmode. We just use a single character.
+        const char *lock = (aps[i].authmode == WIFI_AUTH_OPEN) ? "" : "#";
+        snprintf(label, sizeof(label), "%s%-30.30s  %ddBm%s",
+                 connected ? "*" : " ",
+                 (char *)aps[i].ssid,
+                 (int)aps[i].rssi,
+                 lock);
+        lv_obj_t *btn = lv_list_add_button(s_settings.list, NULL, label);
+        // Allocate a heap copy of the SSID so the click handler can read it.
+        // Free in the LV_EVENT_DELETE callback below.
+        char *ssid_copy = (char *)lv_malloc(sizeof(aps[i].ssid));
+        if (!ssid_copy) return;
+        strncpy(ssid_copy, (char *)aps[i].ssid, sizeof(aps[i].ssid) - 1);
+        ssid_copy[sizeof(aps[i].ssid) - 1] = 0;
+        lv_obj_set_user_data(btn, ssid_copy);
+        lv_obj_add_event_cb(btn, on_ap_clicked, LV_EVENT_CLICKED, ssid_copy);
+        // Free the copy on delete so we don't leak.
+        lv_obj_add_event_cb(btn, [](lv_event_t *ev) {
+            lv_obj_t *target = (lv_obj_t *)lv_event_get_current_target(ev);
+            char *p = (char *)lv_obj_get_user_data(target);
+            if (p) {
+                lv_free(p);
+                lv_obj_set_user_data(target, nullptr);
+            }
+        }, LV_EVENT_DELETE, nullptr);
+    }
+    if (n == 0) {
+        lv_list_add_text(s_settings.list, "(no scan results)");
+    }
+}
+
+static void on_rescan_clicked(lv_event_t *e)
+{
+    (void)e;
+    app::wifi_manager_scan_start();
+}
+
+static void on_disconnect_clicked(lv_event_t *e)
+{
+    (void)e;
+    app::wifi_manager_disconnect();
+    refresh_settings_status();
+}
+
+static void on_forget_clicked(lv_event_t *e)
+{
+    (void)e;
+    app::wifi_manager_forget();
+    refresh_settings_status();
+}
+
+static void close_pass_popup()
+{
+    if (s_settings.pass_popup) {
+        lv_obj_del(s_settings.pass_popup);
+        s_settings.pass_popup = nullptr;
+        s_settings.pass_ta    = nullptr;
+    }
+}
+
+// "Connect" button inside the password popup.
+static void on_connect_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (!s_settings.pass_ta) return;
+    const char *pass = lv_textarea_get_text(s_settings.pass_ta);
+    if (!pass) pass = "";
+    if (s_settings.pass_ssid[0] == 0) {
+        close_pass_popup();
+        return;
+    }
+    app::wifi_manager_connect(s_settings.pass_ssid, pass);
+    close_pass_popup();
+    refresh_settings_status();
+}
+
+static void on_ap_clicked(lv_event_t *e)
+{
+    char *ssid = (char *)lv_event_get_user_data(e);
+    if (!ssid) return;
+    strncpy(s_settings.pass_ssid, ssid, sizeof(s_settings.pass_ssid) - 1);
+    s_settings.pass_ssid[sizeof(s_settings.pass_ssid) - 1] = 0;
+
+    // Build a modal-style overlay containing a password field + Connect.
+    lv_obj_t *popup = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(popup, 280, 130);
+    lv_obj_set_pos(popup, 20, 38);
+    lv_obj_set_style_bg_color(popup, lv_color_hex(0x263238), 0);
+    lv_obj_set_style_border_color(popup, lv_color_hex(0x1976D2), 0);
+    lv_obj_set_style_border_width(popup, 2, 0);
+    lv_obj_set_style_radius(popup, 8, 0);
+    lv_obj_set_style_pad_all(popup, 8, 0);
+
+    lv_obj_t *title = lv_label_create(popup);
+    lv_label_set_text_fmt(title, "Password: %s", ssid);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+
+    lv_obj_t *ta = lv_textarea_create(popup);
+    lv_obj_set_size(ta, 260, 32);
+    lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 30);
+    lv_textarea_set_password_mode(ta, true);
+    lv_textarea_set_one_line(ta, true);
+    lv_textarea_set_placeholder_text(ta, "password");
+    // Open the keyboard so the user can type immediately.
+    lv_obj_t *kb = lv_keyboard_create(lv_scr_act());
+    lv_keyboard_set_textarea(kb, ta);
+    lv_obj_set_style_bg_opa(kb, LV_OPA_90, 0);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_size(kb, 320, 110);
+    lv_obj_add_event_cb(kb, [](lv_event_t *ev) {
+        // Hide keyboard but keep popup open.
+        lv_obj_add_flag((lv_obj_t *)lv_event_get_current_target(ev),
+                        LV_OBJ_FLAG_HIDDEN);
+    }, LV_EVENT_DEFOCUSED, nullptr);
+
+    lv_obj_t *cancel_btn = lv_button_create(popup);
+    lv_obj_set_size(cancel_btn, 100, 30);
+    lv_obj_align(cancel_btn, LV_ALIGN_BOTTOM_LEFT, 8, -4);
+    lv_obj_add_event_cb(cancel_btn, [](lv_event_t *ev) {
+        (void)ev;
+        close_pass_popup();
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *cancel_lbl = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_lbl, "Cancel");
+    lv_obj_center(cancel_lbl);
+
+    lv_obj_t *connect_btn = lv_button_create(popup);
+    lv_obj_set_size(connect_btn, 100, 30);
+    lv_obj_align(connect_btn, LV_ALIGN_BOTTOM_RIGHT, -8, -4);
+    lv_obj_add_event_cb(connect_btn, on_connect_clicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *connect_lbl = lv_label_create(connect_btn);
+    lv_label_set_text(connect_lbl, "Connect");
+    lv_obj_center(connect_lbl);
+
+    s_settings.pass_popup = popup;
+    s_settings.pass_ta    = ta;
+}
+
+static lv_obj_t *build_page_settings(lv_obj_t *parent)
+{
+    lv_obj_t *root = lv_obj_create(parent);
+    lv_obj_set_size(root, 320, 208);
+    lv_obj_set_style_bg_color(root, lv_color_black(), 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_pad_all(root, 0, 0);
+
+    // Status bar.
+    s_settings.status_label = lv_label_create(root);
+    lv_obj_set_style_text_font(s_settings.status_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_settings.status_label, lv_color_white(), 0);
+    lv_obj_align(s_settings.status_label, LV_ALIGN_TOP_LEFT, 4, 2);
+    refresh_settings_status();
+
+    // Button row.
+    auto make_btn = [&](const char *text, int x, lv_event_cb_t cb) {
+        lv_obj_t *b = lv_button_create(root);
+        lv_obj_set_size(b, 70, 26);
+        lv_obj_set_pos(b, x, 22);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x37474F), 0);
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(b);
+        lv_label_set_text(lbl, text);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        lv_obj_center(lbl);
+        return b;
+    };
+    make_btn("Rescan",      4,  on_rescan_clicked);
+    make_btn("Disconnect", 78,  on_disconnect_clicked);
+    make_btn("Forget",     152, on_forget_clicked);
+
+    // AP list.
+    s_settings.list = lv_list_create(root);
+    lv_obj_set_size(s_settings.list, 312, 152);
+    lv_obj_set_pos(s_settings.list, 4, 52);
+    lv_obj_set_style_bg_color(s_settings.list, lv_color_hex(0x101010), 0);
+    lv_obj_set_style_pad_all(s_settings.list, 0, 0);
+    lv_obj_set_style_border_width(s_settings.list, 0, 0);
+    rebuild_ap_list();
+
+    // Poll the status every 500 ms so the user sees CONNECTING →
+    // CONNECTED transitions without a manual refresh.
+    s_settings_poll = lv_timer_create(settings_poll_cb, 500, nullptr);
+
+    return root;
+}
+
+static void destroy_page_settings(lv_obj_t *root)
+{
+    (void)root;
+    if (s_settings_poll) {
+        lv_timer_del(s_settings_poll);
+        s_settings_poll = nullptr;
+    }
+    close_pass_popup();
+    s_settings.status_label = nullptr;
+    s_settings.list = nullptr;
 }
 
 // ---------------- Boot --------------------------------------------------------
@@ -559,10 +823,10 @@ static void build_ui()
     lv_obj_t *screen = lv_scr_act();
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
 
-    pet::pages::register_page(pet::pages::Page::Status, build_page_status, destroy_page_status);
-    pet::pages::register_page(pet::pages::Page::Games,  build_page_games,  destroy_page_games);
-    pet::pages::register_page(pet::pages::Page::Shop,   build_page_shop,   nullptr);
-    pet::pages::register_page(pet::pages::Page::About,  build_page_about,  nullptr);
+    pet::pages::register_page(pet::pages::Page::Status,   build_page_status,   destroy_page_status);
+    pet::pages::register_page(pet::pages::Page::Games,    build_page_games,    destroy_page_games);
+    pet::pages::register_page(pet::pages::Page::Shop,     build_page_shop,     nullptr);
+    pet::pages::register_page(pet::pages::Page::Settings, build_page_settings, destroy_page_settings);
 
     pet::pages::build_tabs(screen);
     pet::pages::switch_page(pet::pages::Page::Status);

@@ -6,7 +6,7 @@ namespace pages {
 
 static const char *TAG = "pet_pages";
 
-static const char *kTabLabels[(int)Page::Count] = {"Status", "Games", "Shop", "About"};
+static const char *kTabLabels[(int)Page::Count] = {"Status", "Games", "Shop", "Settings"};
 
 struct PageHandlers {
     BuildFn build = nullptr;
