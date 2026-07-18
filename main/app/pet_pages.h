@@ -5,14 +5,30 @@
 namespace pet {
 namespace pages {
 
-// Logical pages the pet UI knows about.
+// Logical pages the pet UI knows about. AIUsage is always present in the
+// enum (so the build/destroy handlers have a stable slot) but is hidden
+// from the tab bar when no AI API keys are configured.
 enum class Page {
     Status = 0,
     Games,
     Shop,
     Settings,
+    AIUsage,
+    // Sentinel — not a real page. Use page_count() instead.
     Count,
 };
+
+// Number of tabs the tab bar should render. 4 by default; 5 when the AI
+// Usage feature is enabled.
+int  page_count();
+
+// True when at least one AI API key is configured and the worker is
+// running. The AIUsage tab is drawn only when this is true.
+bool ai_usage_enabled();
+
+// Flip the runtime flag. Called from pet_ai_usage::register_page_handlers
+// after deciding whether to mount the page.
+void set_ai_usage_enabled(bool on);
 
 // Build the shared tab bar at the bottom of the screen. Must be called once
 // after build_ui() and before switch_page(). Lives on the screen object.

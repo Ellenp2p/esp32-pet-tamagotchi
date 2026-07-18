@@ -47,4 +47,13 @@ CONFIG_LV_COLOR_16_SWAP=n
 CONFIG_PET_WIFI_SSID=""
 CONFIG_PET_WIFI_PASSWORD=""
 CONFIG_PET_WIFI_MAX_RETRY=5
+# AI Usage tab — fill via `idf.py menuconfig` -> Pet Project Configuration
+# -> AI Usage. Empty default hides the AI tab entirely (no worker, no UI).
+CONFIG_PET_AI_USAGE_KIMI_KEY=""
+CONFIG_PET_AI_USAGE_MINIMAX_KEY=""
 CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
+
+# v0.6.7: HTTPS cert verification for AI provider usage APIs.
+# Without this, esp_tls refuses the handshake ("No server verification
+# option set"). The x509 bundle is built into the firmware image.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y

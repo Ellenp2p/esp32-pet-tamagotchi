@@ -4,6 +4,7 @@ idf_component_register(SRCS "main.cpp"
                              "bsp/bsp_lcd.cpp"
                              "bsp/bsp_touch.cpp"
                              "bsp/bsp_qmi8658.cpp"
+                             "bsp/bsp_key.cpp"
                              "lvgl/lvgl_init.cpp"
                              "app/pet_state.cpp"
                              "app/pet_meta.cpp"
@@ -16,7 +17,9 @@ idf_component_register(SRCS "main.cpp"
                              "app/pet_ui.cpp"
                              "app/wifi_manager.cpp"
                              "app/ble_pet.cpp"
-                    PRIV_REQUIRES driver esp_driver_gpio esp_driver_spi esp_driver_ledc esp_driver_i2c esp_lcd espressif__esp_lcd_touch espressif__esp_lvgl_port lvgl__lvgl heap esp_timer nvs_flash esp_wifi esp_event esp_netif bt
+                             "app/pet_ai_usage.cpp"
+                             "app/screen_power.cpp"
+                    PRIV_REQUIRES driver esp_driver_gpio esp_driver_spi esp_driver_ledc esp_driver_i2c esp_lcd espressif__esp_lcd_touch espressif__esp_lvgl_port lvgl__lvgl heap esp_timer nvs_flash esp_wifi esp_event esp_netif bt espressif__cjson esp_http_client mbedtls
                     INCLUDE_DIRS ".")
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-missing-field-initializers -Wno-deprecated-enum-enum-conversion)

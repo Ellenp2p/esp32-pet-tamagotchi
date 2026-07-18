@@ -6,7 +6,7 @@ namespace pages {
 
 static const char *TAG = "pet_pages";
 
-static const char *kTabLabels[(int)Page::Count] = {"Status", "Games", "Shop", "Settings"};
+static const char *kTabLabels[(int)Page::Count] = {"Status", "Games", "Shop", "Settings", "AI"};
 
 struct PageHandlers {
     BuildFn build = nullptr;
@@ -18,6 +18,15 @@ static PageHandlers s_handlers[(int)Page::Count];
 static Page s_current = Page::Status;
 static lv_obj_t *s_tabs[(int)Page::Count] = {nullptr};
 static lv_obj_t *s_content = nullptr;
+
+// v0.6.7: runtime flag toggled by pet_ai_usage::register_page_handlers.
+// When false, the AIUsage tab is hidden (page_count() returns 4) and its
+// build/destroy handler slot stays unused.
+static bool s_ai_enabled = false;
+
+bool ai_usage_enabled() { return s_ai_enabled; }
+void set_ai_usage_enabled(bool on) { s_ai_enabled = on; }
+int  page_count() { return s_ai_enabled ? 5 : 4; }
 
 void register_page(Page page, BuildFn build, DestroyFn destroy)
 {
@@ -53,11 +62,14 @@ void build_tabs(lv_obj_t *screen)
     lv_obj_set_style_border_width(s_content, 0, 0);
     lv_obj_set_style_pad_all(s_content, 0, 0);
 
-    // Tab bar at the bottom: 4 buttons of 80x32.
-    for (int i = 0; i < (int)Page::Count; i++) {
+    // Tab bar at the bottom: page_count() buttons sized to fit 320 px.
+    // 4 tabs -> 80 px each, 5 tabs -> 64 px each.
+    int n = page_count();
+    int btn_w = 320 / n;
+    for (int i = 0; i < n; i++) {
         lv_obj_t *btn = lv_button_create(screen);
-        lv_obj_set_size(btn, 80, 32);
-        lv_obj_set_pos(btn, i * 80, 208);
+        lv_obj_set_size(btn, btn_w, 32);
+        lv_obj_set_pos(btn, i * btn_w, 208);
         lv_obj_add_event_cb(btn, tab_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         style_active_tab(btn, i == (int)s_current);
 
@@ -70,7 +82,8 @@ void build_tabs(lv_obj_t *screen)
 
 static void highlight_tab(Page page)
 {
-    for (int i = 0; i < (int)Page::Count; i++) {
+    int n = page_count();
+    for (int i = 0; i < n; i++) {
         style_active_tab(s_tabs[i], i == (int)page);
     }
 }

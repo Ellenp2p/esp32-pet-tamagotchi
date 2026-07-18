@@ -19,4 +19,16 @@ menu "Pet Project Configuration"
         help
             Maximum connection retries before giving up.
 
+    config PET_AI_USAGE_KIMI_KEY
+        string "Kimi API key (api.kimi.com)"
+        default ""
+        help
+            Bearer token for Kimi usage API. Empty hides the AI Usage tab.
+
+    config PET_AI_USAGE_MINIMAX_KEY
+        string "MiniMax API key (www.minimaxi.com)"
+        default ""
+        help
+            Bearer token for MiniMax usage API. Empty hides just the MiniMax card.
+
 endmenu
