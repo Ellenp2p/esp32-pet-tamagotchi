@@ -10,6 +10,8 @@
 #include "pet_idle_events.h"
 #include "app/ble_pet.h"
 #include "app/wifi_manager.h"
+#include "app/pet_ai_usage.h"
+#include "app/screen_power.h"
 #include "bsp/bsp_qmi8658.h"
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
@@ -602,15 +604,21 @@ static lv_obj_t *build_page_shop(lv_obj_t *parent)
 // v0.6.6: WiFi settings page. Layout (320x208):
 //   y=0..32   status bar  (SSID / state / IP)
 //   y=36..56  "Rescan" + "Forget" + "Disconnect" buttons
-//   y=60..208 AP list  (each item: SSID, lock icon, RSSI, "*" if connected)
+//   y=60..168 AP list  (each item: SSID, lock icon, RSSI, "*" if connected)
+//   y=170..200 Lock row + auto-off toggles
 struct SettingsCtx {
-    lv_obj_t *status_label = nullptr;
-    lv_obj_t *list        = nullptr;
+    lv_obj_t *status_label    = nullptr;
+    lv_obj_t *list            = nullptr;
+    lv_obj_t *lock_btn        = nullptr;
+    lv_obj_t *to_off_btn      = nullptr;
+    lv_obj_t *to_2min_btn     = nullptr;
+    lv_obj_t *to_5min_btn     = nullptr;
+    lv_obj_t *to_label        = nullptr;
     // Password popup state — created on demand when an AP is selected.
-    lv_obj_t *pass_popup  = nullptr;
-    lv_obj_t *pass_ta     = nullptr;
-    lv_obj_t *pass_kb     = nullptr;
-    char      pass_ssid[33] = {};
+    lv_obj_t *pass_popup      = nullptr;
+    lv_obj_t *pass_ta         = nullptr;
+    lv_obj_t *pass_kb         = nullptr;
+    char      pass_ssid[33]   = {};
 };
 static SettingsCtx s_settings;
 
@@ -620,6 +628,12 @@ static void on_rescan_clicked(lv_event_t *e);
 static void on_disconnect_clicked(lv_event_t *e);
 static void on_forget_clicked(lv_event_t *e);
 static void refresh_settings_status();
+// v0.7: Lock + auto-off toggle handlers
+static void on_lock_clicked(lv_event_t *e);
+static void on_to_off_clicked(lv_event_t *e);
+static void on_to_2min_clicked(lv_event_t *e);
+static void on_to_5min_clicked(lv_event_t *e);
+static void refresh_timeout_label();
 
 // One-shot lvgl timer that polls wifi_manager state and refreshes the UI.
 static lv_timer_t *s_settings_poll = nullptr;
@@ -755,6 +769,47 @@ static void on_forget_clicked(lv_event_t *e)
     (void)e;
     app::wifi_manager_forget();
     refresh_settings_status();
+}
+
+// v0.7: Lock now / auto-off toggle handlers.
+static void on_lock_clicked(lv_event_t *e)
+{
+    (void)e;
+    pet::ScreenPower::instance().lock_now();
+}
+
+static void on_to_off_clicked(lv_event_t *e)
+{
+    (void)e;
+    pet::ScreenPower::instance().set_timeout(pet::ScreenTimeout::Off);
+    refresh_timeout_label();
+}
+
+static void on_to_2min_clicked(lv_event_t *e)
+{
+    (void)e;
+    pet::ScreenPower::instance().set_timeout(pet::ScreenTimeout::Min2);
+    refresh_timeout_label();
+}
+
+static void on_to_5min_clicked(lv_event_t *e)
+{
+    (void)e;
+    pet::ScreenPower::instance().set_timeout(pet::ScreenTimeout::Min5);
+    refresh_timeout_label();
+}
+
+static void refresh_timeout_label()
+{
+    if (!s_settings.to_label) return;
+    pet::ScreenTimeout t = pet::ScreenPower::instance().timeout();
+    const char *txt = "?";
+    switch (t) {
+        case pet::ScreenTimeout::Off:  txt = "Off";    break;
+        case pet::ScreenTimeout::Min2: txt = "2 min";  break;
+        case pet::ScreenTimeout::Min5: txt = "5 min";  break;
+    }
+    lv_label_set_text(s_settings.to_label, txt);
 }
 
 static void close_pass_popup()
@@ -932,14 +987,59 @@ static lv_obj_t *build_page_settings(lv_obj_t *parent)
     make_btn("Disconnect", 78,  on_disconnect_clicked);
     make_btn("Forget",     152, on_forget_clicked);
 
-    // AP list.
+    // AP list — shrunk from 152 to 108 px tall to leave room for the
+    // Lock + auto-off row at the bottom.
     s_settings.list = lv_list_create(root);
-    lv_obj_set_size(s_settings.list, 312, 152);
+    lv_obj_set_size(s_settings.list, 312, 108);
     lv_obj_set_pos(s_settings.list, 4, 52);
     lv_obj_set_style_bg_color(s_settings.list, lv_color_hex(0x101010), 0);
     lv_obj_set_style_pad_all(s_settings.list, 0, 0);
     lv_obj_set_style_border_width(s_settings.list, 0, 0);
     rebuild_ap_list();
+
+    // v0.7: Lock + auto-off toggle row (y=164..198).
+    // Layout:
+    //   x=4      "Lock" button
+    //   x=80     "Auto-off:" label
+    //   x=140    "Off" toggle, x=180 "2m", x=220 "5m"
+    //   x=260    current selection text
+    s_settings.lock_btn = lv_button_create(root);
+    lv_obj_set_size(s_settings.lock_btn, 70, 24);
+    lv_obj_set_pos(s_settings.lock_btn, 4, 170);
+    lv_obj_set_style_bg_color(s_settings.lock_btn, lv_color_hex(0xC62828), 0);
+    lv_obj_add_event_cb(s_settings.lock_btn, on_lock_clicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *lock_lbl = lv_label_create(s_settings.lock_btn);
+    lv_label_set_text(lock_lbl, "Lock");
+    lv_obj_set_style_text_font(lock_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_center(lock_lbl);
+
+    lv_obj_t *to_hdr = lv_label_create(root);
+    lv_obj_set_style_text_font(to_hdr, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(to_hdr, lv_color_hex(0x90A4AE), 0);
+    lv_label_set_text(to_hdr, "Auto-off:");
+    lv_obj_set_pos(to_hdr, 84, 176);
+
+    auto make_to_btn = [&](const char *txt, int x, lv_event_cb_t cb) {
+        lv_obj_t *b = lv_button_create(root);
+        lv_obj_set_size(b, 36, 24);
+        lv_obj_set_pos(b, x, 170);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x37474F), 0);
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(b);
+        lv_label_set_text(lbl, txt);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_center(lbl);
+        return b;
+    };
+    s_settings.to_off_btn  = make_to_btn("Off", 156, on_to_off_clicked);
+    s_settings.to_2min_btn = make_to_btn("2m",  194, on_to_2min_clicked);
+    s_settings.to_5min_btn = make_to_btn("5m",  232, on_to_5min_clicked);
+
+    s_settings.to_label = lv_label_create(root);
+    lv_obj_set_style_text_font(s_settings.to_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_settings.to_label, lv_color_white(), 0);
+    lv_obj_set_pos(s_settings.to_label, 274, 176);
+    refresh_timeout_label();
 
     // Poll the status every 500 ms so the user sees CONNECTING →
     // CONNECTED transitions without a manual refresh.
@@ -957,7 +1057,12 @@ static void destroy_page_settings(lv_obj_t *root)
     }
     close_pass_popup();
     s_settings.status_label = nullptr;
-    s_settings.list = nullptr;
+    s_settings.list         = nullptr;
+    s_settings.lock_btn     = nullptr;
+    s_settings.to_off_btn   = nullptr;
+    s_settings.to_2min_btn  = nullptr;
+    s_settings.to_5min_btn  = nullptr;
+    s_settings.to_label     = nullptr;
 }
 
 // ---------------- Boot --------------------------------------------------------
@@ -970,6 +1075,8 @@ static void build_ui()
     pet::pages::register_page(pet::pages::Page::Games,    build_page_games,    destroy_page_games);
     pet::pages::register_page(pet::pages::Page::Shop,     build_page_shop,     nullptr);
     pet::pages::register_page(pet::pages::Page::Settings, build_page_settings, destroy_page_settings);
+    // v0.6.7: AI Usage tab — no-op when no keys are configured.
+    pet::ai_usage::register_page_handlers();
 
     pet::pages::build_tabs(screen);
     pet::pages::switch_page(pet::pages::Page::Status);
@@ -998,8 +1105,17 @@ static void pet_task(void *arg)
         }
 
         if (bsp::QMI8658::instance().read(&imu_data) == ESP_OK) {
+            // v0.7: a permissive wake-motion detector runs alongside
+            // the strict play-shake detector. detect_wake_motion() is
+            // called on every sample so the screen can wake up even
+            // when the user only gives a small pickup jolt.
+            bool woke = bsp::QMI8658::instance().detect_wake_motion(imu_data);
+            if (woke) {
+                pet::ScreenPower::instance().note_input();
+            }
             if (bsp::QMI8658::instance().detect_shake(imu_data)) {
                 ESP_LOGI(TAG, "Shake detected!");
+                pet::ScreenPower::instance().note_input();
                 if (!Pet::instance().is_sleeping()) {
                     Pet::instance().play();
                 } else {

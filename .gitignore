@@ -24,6 +24,7 @@ build.log
 flash.log
 mon*.log
 mon*.err
+env.txt
 .DS_Store
 Thumbs.db
 

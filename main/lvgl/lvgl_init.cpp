@@ -2,6 +2,7 @@
 #include "bsp/bsp_config.h"
 #include "bsp/bsp_lcd.h"
 #include "bsp/bsp_touch.h"
+#include "app/screen_power.h"
 
 #include "lvgl.h"
 #include "esp_log.h"
@@ -57,6 +58,15 @@ esp_err_t init()
         .handle = bsp::Touch::instance().handle(),
     };
     touch_indev_ = lvgl_port_add_touch(&touch_cfg);
+
+    // v0.7: hook the touch input device so any press resets the screen
+    // idle timer (and wakes the screen if it was off).
+    lv_indev_add_event_cb(touch_indev_,
+                          [](lv_event_t *ev) {
+                              (void)ev;
+                              pet::ScreenPower::instance().note_input();
+                          },
+                          LV_EVENT_PRESSED, nullptr);
 
     ESP_LOGI(TAG, "LVGL initialized");
     return ESP_OK;

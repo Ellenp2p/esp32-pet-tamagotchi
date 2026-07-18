@@ -3,6 +3,7 @@
 #include "bsp_i2c.h"
 #include "esp_log.h"
 #include "driver/i2c_master.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "math.h"
@@ -210,6 +211,74 @@ bool QMI8658::detect_shake(QMI8658_Data &data)
 
     last_shake_state_ = currently_shaking;
     return shake_event;
+}
+
+// v0.7: wake-motion — high-pass change detector.
+//
+// Strategy: track the previous magnitude and require that the current
+// sample differs from it by a large amount AND that the difference
+// changes sign again within a short window. This rejects:
+//   - Picking the pet up (slow tilt, magnitude shifts ~3000 LSB over
+//     hundreds of ms, no rapid reversal)
+//   - Walking with it in a bag (constant low-frequency motion, no
+//     sustained delta)
+//
+// It accepts:
+//   - A deliberate back-and-forth shake (large positive AND negative
+//     deltas within ~500 ms)
+bool QMI8658::detect_wake_motion(QMI8658_Data &data)
+{
+    // Run the strict shake detector too — it refreshes its own EMA
+    // baseline which we don't want wake_motion's actions to disturb.
+    (void)detect_shake(data);
+
+    const float JERK_DELTA         = 12000.0f;  // raw |Δmag| between samples
+    const uint32_t JERK_WINDOW_MS  = 800;       // window to see both signs
+    const uint32_t WAKE_COOLDOWN_MS = 1500;     // 1.5 s quiet between wakes
+
+    static float prev_mag = 0.0f;
+    static bool  primed   = false;
+    // Track the largest +delta and largest -delta we've seen in the
+    // window so far, plus the timestamp of the window start.
+    static int64_t win_start_ms = 0;
+    static float   max_pos_delta = 0.0f;
+    static float   max_neg_delta = 0.0f;
+
+    float mag = accel_magnitude(data);
+    int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000);
+    if (!primed) {
+        prev_mag  = mag;
+        primed    = true;
+        win_start_ms = now_ms;
+        max_pos_delta = max_neg_delta = 0.0f;
+        return false;
+    }
+
+    float delta = mag - prev_mag;
+    prev_mag = mag;
+
+    // Reset the rolling window if it expired.
+    if (now_ms - win_start_ms > (int64_t)JERK_WINDOW_MS) {
+        win_start_ms = now_ms;
+        max_pos_delta = max_neg_delta = 0.0f;
+    }
+    if (delta > max_pos_delta) max_pos_delta = delta;
+    if (delta < max_neg_delta) max_neg_delta = delta;
+
+    // We need BOTH a strong positive and a strong negative delta
+    // inside the same window — i.e. a real oscillation, not a one-way
+    // slow tilt. |neg_delta| gives the magnitude of the negative side.
+    bool saw_jerk = (max_pos_delta > JERK_DELTA) &&
+                    (-max_neg_delta > JERK_DELTA);
+
+    if (saw_jerk && (now_ms - (int64_t)last_wake_tick_ > WAKE_COOLDOWN_MS)) {
+        last_wake_tick_ = (uint32_t)now_ms;
+        // Reset the window so the next shake starts fresh.
+        win_start_ms = now_ms;
+        max_pos_delta = max_neg_delta = 0.0f;
+        return true;
+    }
+    return false;
 }
 
 } // namespace bsp

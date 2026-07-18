@@ -30,6 +30,13 @@ public:
     // Return true if a shake is detected (uses simple threshold + cooldown)
     bool detect_shake(QMI8658_Data &data);
 
+    // v0.7: wake-motion — high-pass change detector. Looks at the
+    // magnitude DELTA between consecutive samples, not the absolute
+    // deviation from a baseline. This rejects slow orientation changes
+    // (picking the pet up, putting it down) and only fires on a real
+    // jerk/shake.
+    bool detect_wake_motion(QMI8658_Data &data);
+
 private:
     QMI8658() = default;
     esp_err_t write_reg(uint8_t reg, uint8_t value);
@@ -38,6 +45,8 @@ private:
     void *dev_handle_ = nullptr;
     uint32_t last_shake_tick_ = 0;
     bool last_shake_state_ = false;
+    // Wake-motion uses its own per-sample delta + cooldown.
+    uint32_t last_wake_tick_ = 0;
 };
 
 } // namespace bsp

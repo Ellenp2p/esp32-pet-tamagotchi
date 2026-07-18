@@ -8,8 +8,11 @@
 #include "bsp/bsp_lcd.h"
 #include "bsp/bsp_touch.h"
 #include "bsp/bsp_qmi8658.h"
+#include "bsp/bsp_key.h"
 #include "lvgl/lvgl_init.h"
 #include "app/pet_ui.h"
+#include "app/pet_ai_usage.h"
+#include "app/screen_power.h"
 
 static const char *TAG = "main";
 
@@ -38,6 +41,15 @@ extern "C" void app_main(void)
 
     // Build the pet UI and start its logic task.
     ESP_ERROR_CHECK(pet::start_ui());
+
+    // v0.7: BOOT-key ISR driver + idle-aware screen-off power manager.
+    // BootKey must come first — screen_power's worker reads from its queue.
+    ESP_ERROR_CHECK(bsp::BootKey::instance().init());
+    pet::ScreenPower::instance().init();
+
+    // v0.6.7: AI usage polling task (5 min). No-op when no API keys
+    // are configured; the AIUsage tab itself is also hidden in that case.
+    pet::ai_usage::start();
 
     ESP_LOGI(TAG, "Init complete");
 }
