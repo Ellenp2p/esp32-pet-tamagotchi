@@ -92,7 +92,13 @@ esp32-pet/
 ├── docs/
 │   ├── PINOUT.md               # 引脚一览(中文)
 │   └── GAMEPLAY.md             # 玩法说明(中文)
-└── managed_components/         # 拉取的 ESP-IDF 组件(已在 .gitignore)
+├── .clang-format               # C++ 代码风格配置
+├── .editorconfig               # 跨编辑器一致性配置
+├── .gitattributes              # Git 属性(行尾、Linguist)
+├── Makefile                    # 便携构建入口(跨平台)
+├── .github/workflows/          # CI/CD 自动化构建
+├── managed_components/         # 拉取的 ESP-IDF 组件(已在 .gitignore)
+└── build/                      # 编译产物(已在 .gitignore)
 ```
 
 ## 🚀 构建步骤

@@ -1,0 +1,19 @@
+# Normalize line endings to LF for text files
+* text=auto eol=lf
+
+# Mark managed components as auto-generated for GitHub Linguist
+managed_components/** linguist-generated=true
+
+# Mark build output as generated
+build/** linguist-generated=true
+
+# Binary files should not be modified
+*.png binary
+*.bin binary
+*.elf binary
+*.map binary
+*.a binary
+*.o binary
+
+# Documentation
+*.md linguist-detectable=true
