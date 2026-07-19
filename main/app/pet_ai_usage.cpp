@@ -14,6 +14,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #include <mutex>
 
 namespace pet {
@@ -527,16 +528,21 @@ static lv_color_t color_for_pct(int pct)
     return lv_color_hex(0x66BB6A);
 }
 
-// Render the local clock "HH:MM" in CN (UTC+8). Updates once per second via
-// the existing 500 ms poll timer; cheap because lv_label_set_text just
-// invalidates the label rect.
+// Render the local clock "HH:MM" in CN (UTC+8). Reads from the system
+// time (set by SNTP when Wi-Fi is up). Before SNTP completes the
+// display shows "--:--" instead of a nonsense 1970-derived time.
 static void render_clock()
 {
     if (!s_ctx.clock_lbl) return;
-    int64_t us = esp_timer_get_time();
-    time_t t = (time_t)(us / 1000000) + 8 * 3600;
+    time_t now = time(nullptr);
+    if (now < 1700000000) {  // before ~2023-11-14; SNTP hasn't synced yet
+        lv_label_set_text(s_ctx.clock_lbl, "--:--");
+        return;
+    }
+    // Apply the CN offset (UTC+8) and render as wall-clock HH:MM.
+    time_t local = now + 8 * 3600;
     struct tm tm;
-    gmtime_r(&t, &tm);
+    gmtime_r(&local, &tm);
     char buf[8];
     snprintf(buf, sizeof(buf), "%02d:%02d", tm.tm_hour, tm.tm_min);
     lv_label_set_text(s_ctx.clock_lbl, buf);
