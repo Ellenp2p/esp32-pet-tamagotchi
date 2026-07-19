@@ -28,7 +28,8 @@ static const char *TAG = "ai_usage";
 // out empty.
 static void format_epoch_ms(int64_t ms, char *out, size_t sz)
 {
-    if (ms <= 0) { out[0] = 0; return; }
+    out[0] = 0;
+    if (ms <= 0) return;
     time_t t = (time_t)(ms / 1000);
     // Apply CN offset (UTC+8) so the displayed wall-clock matches the
     // API's reset timestamps.
@@ -39,17 +40,41 @@ static void format_epoch_ms(int64_t ms, char *out, size_t sz)
              tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
 }
 
-// Same, but for an ISO-8601 / RFC-3339 string like
-// "2026-07-24T08:12:16.707786Z" — we strip the date+time+minute and
-// render "MM-DD HH:MM" so the UI stays compact.
+// Parse an ISO-8601 / RFC-3339 string like "2026-07-24T08:12:16.707786Z"
+// and render it as local CN wall-clock "MM-DD HH:MM" (UTC+8).
+//
+// The API always returns UTC ("...Z") — without an explicit offset
+// suffix. We sscanf the Y/M/D/H/M fields, treat them as UTC, and
+// shift by +8 hours, normalising across month and day boundaries.
 static void format_iso(const char *iso, char *out, size_t sz)
 {
     if (!iso || !iso[0]) { out[0] = 0; return; }
-    int mo = 0, da = 0, hh = 0, mi = 0;
-    // Accept "YYYY-MM-DDTHH:MM:SS..." and similar.
-    if (sscanf(iso, "%*d-%d-%dT%d:%d", &mo, &da, &hh, &mi) < 4) {
+    int yr = 0, mo = 0, da = 0, hh = 0, mi = 0;
+    if (sscanf(iso, "%d-%d-%dT%d:%d", &yr, &mo, &da, &hh, &mi) < 5) {
         out[0] = 0;
         return;
+    }
+    // Convert UTC → CN (UTC+8). Add 8 hours then normalise into the
+    // right day using a small mday-from-epoch table so we don't pull
+    // in <time.h>'s mktime (which needs the system timezone set).
+    constexpr int8_t mdays[12] = {
+        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+    };
+    auto is_leap = [](int y) {
+        return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+    };
+    int mdays_y[12];
+    for (int i = 0; i < 12; i++) mdays_y[i] = mdays[i] + ((i == 1 && is_leap(yr)) ? 1 : 0);
+
+    hh += 8;
+    if (hh >= 24) {
+        hh -= 24;
+        da += 1;
+        if (da > mdays_y[mo - 1]) {
+            da = 1;
+            mo += 1;
+            if (mo > 12) { mo = 1; yr += 1; }
+        }
     }
     snprintf(out, sz, "%02d-%02d %02d:%02d", mo, da, hh, mi);
 }
