@@ -33,9 +33,9 @@ static constexpr int POLL_PERIOD_MS    = 5 * 60 * 1000;
 static constexpr int RX_BUF           = 2048;
 static constexpr int TASK_STACK_BYTES = 12288;
 
-static std::mutex s_mtx;
-static Snapshot  s_snap;
-static TaskHandle_t s_worker_task = nullptr;  // for v0.6.7 manual refresh
+// State has migrated into AiUsageWorker (Phase 2a). The static state
+// that lived here historically is now thread_local through the worker
+// singleton. These legacy symbol names are removed in Phase 2b.
 
 // ---------- key resolution: Kconfig then NVS escape hatch ---------------
 // Kconfig wins because that's what the user fills via menuconfig; the NVS
@@ -44,9 +44,6 @@ static TaskHandle_t s_worker_task = nullptr;  // for v0.6.7 manual refresh
 static const char *kNsSecrets  = "pet_ai_secrets";
 static const char *kKeyKimi    = "kimi_key";
 static const char *kKeyMinimax = "minimax_key";
-
-static char s_kimi_key[160];
-static char s_minimax_key[160];
 
 static void read_nvs_key(const char *ns, const char *key, char *out, size_t out_sz)
 {
@@ -59,36 +56,34 @@ static void read_nvs_key(const char *ns, const char *key, char *out, size_t out_
 
 static bool has_key(const char *k) { return k && k[0] != 0; }
 
-bool enabled()
+bool AiUsageWorker::enabled() noexcept
 {
     // Kconfig is the canonical source at compile time.
     bool kc_kimi    = has_key(CONFIG_PET_AI_USAGE_KIMI_KEY);
     bool kc_minimax = has_key(CONFIG_PET_AI_USAGE_MINIMAX_KEY);
     // NVS escape hatch (filled at runtime, e.g. by an OTA script).
     if (!kc_kimi || !kc_minimax) {
-        read_nvs_key(kNsSecrets, kKeyKimi,    s_kimi_key,    sizeof(s_kimi_key));
-        read_nvs_key(kNsSecrets, kKeyMinimax, s_minimax_key, sizeof(s_minimax_key));
+        read_nvs_key(kNsSecrets, kKeyKimi,    kimi_key_,    sizeof(kimi_key_));
+        read_nvs_key(kNsSecrets, kKeyMinimax, minimax_key_, sizeof(minimax_key_));
     }
-    bool nv_kimi    = has_key(s_kimi_key);
-    bool nv_minimax = has_key(s_minimax_key);
+    bool nv_kimi    = has_key(kimi_key_);
+    bool nv_minimax = has_key(minimax_key_);
     return (kc_kimi || nv_kimi) || (kc_minimax || nv_minimax);
 }
 
+bool enabled() { return AiUsageWorker::instance().enabled(); }
+
 // Resolves the effective key for a given provider, preferring Kconfig.
-static const char *effective_kimi_key()
+const char *effective_kimi_key(const AiUsageWorker &w)
 {
     if (has_key(CONFIG_PET_AI_USAGE_KIMI_KEY)) return CONFIG_PET_AI_USAGE_KIMI_KEY;
-    return s_kimi_key;
+    return w.kimi_key_;
 }
-static const char *effective_minimax_key()
+const char *effective_minimax_key(const AiUsageWorker &w)
 {
     if (has_key(CONFIG_PET_AI_USAGE_MINIMAX_KEY)) return CONFIG_PET_AI_USAGE_MINIMAX_KEY;
-    return s_minimax_key;
+    return w.minimax_key_;
 }
-
-// ---------- HTTP fetch (delegated to pet::util::HttpClient) -------------
-static util::HttpClient s_http;
-
 // ---------- JSON parsing: Kimi ------------------------------------------
 static int64_t cjson_str_to_i64(const cJSON *v)
 {
@@ -103,12 +98,12 @@ static int64_t cjson_str_to_i64(const cJSON *v)
 //   limits[0].window.duration           = 300 minutes (5 hour)
 //   limits[0].detail.{limit,remaining}   = 5-hour sliding window
 //   usage.resetTime / detail.resetTime   = ISO-8601 next reset
-static void poll_kimi(Snapshot *s, const char *key)
+void AiUsageWorker::poll_kimi(AiUsageWorker &w, Snapshot *s)
 {
     char body[RX_BUF];
     ESP_LOGI(TAG, "kimi: GET /usages");
-    auto resp = s_http.fetch("https://api.kimi.com/coding/v1/usages",
-                             key, body, sizeof(body));
+    auto resp = w.http_.fetch("https://api.kimi.com/coding/v1/usages",
+                              effective_kimi_key(w), body, sizeof(body));
     if (!resp.ok()) {
         ESP_LOGE(TAG, "kimi: http err=%s status=%d",
                  esp_err_to_name(resp.err), resp.status);
@@ -250,12 +245,12 @@ static void fill_minimax(MiniMaxUsage *m, cJSON *it)
     }
 }
 
-static void poll_minimax(Snapshot *s, const char *key)
+void AiUsageWorker::poll_minimax(AiUsageWorker &w, Snapshot *s)
 {
     char body[RX_BUF];
     ESP_LOGI(TAG, "minimax: GET /token_plan/remains");
-    auto resp = s_http.fetch("https://www.minimaxi.com/v1/token_plan/remains",
-                             key, body, sizeof(body));
+    auto resp = w.http_.fetch("https://www.minimaxi.com/v1/token_plan/remains",
+                              effective_minimax_key(w), body, sizeof(body));
     if (!resp.ok()) {
         s->minimax.any_ok = false;
         s->minimax.weekly.ok = false;
@@ -307,7 +302,7 @@ static bool wifi_is_up()
     return st.state == app::WIFI_CONN_CONNECTED;
 }
 
-static void do_poll_locked(Snapshot *s)
+void AiUsageWorker::do_poll_locked(AiUsageWorker &w, Snapshot *s)
 {
     s->refreshing = true;
     if (!wifi_is_up()) {
@@ -324,10 +319,10 @@ static void do_poll_locked(Snapshot *s)
         s->last_success_ms = esp_timer_get_time() / 1000;
         return;
     }
-    const char *kk = effective_kimi_key();
-    const char *mk = effective_minimax_key();
+    const char *kk = effective_kimi_key(w);
+    const char *mk = effective_minimax_key(w);
     if (has_key(kk)) {
-        poll_kimi(s, kk);
+        poll_kimi(w, s);
     } else {
         s->kimi.any_ok = false;
         s->kimi.weekly.ok = false;
@@ -335,7 +330,7 @@ static void do_poll_locked(Snapshot *s)
         snprintf(s->kimi.err, sizeof(s->kimi.err), "no key");
     }
     if (has_key(mk)) {
-        poll_minimax(s, mk);
+        poll_minimax(w, s);
     } else {
         s->minimax.any_ok = false;
         s->minimax.weekly.ok = false;
@@ -356,10 +351,10 @@ static void do_poll_locked(Snapshot *s)
 // request_refresh() from the UI wakes the worker via a FreeRTOS task
 // notification; the worker waits for either the notification or the
 // next 5-minute tick.
-static void ai_task(void * /*arg*/)
+void AiUsageWorker::task_loop()
 {
     int64_t period_us = (int64_t)POLL_PERIOD_MS * 1000;
-    s_worker_task = xTaskGetCurrentTaskHandle();
+    task_ = xTaskGetCurrentTaskHandle();
     for (int waited_s = 0; waited_s < 30 && !wifi_is_up(); waited_s++) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         ESP_LOGI(TAG, "waiting for Wi-Fi (%ds)", waited_s + 1);
@@ -367,8 +362,8 @@ static void ai_task(void * /*arg*/)
     while (true) {
         int64_t t0 = esp_timer_get_time();
         {
-            std::lock_guard<std::mutex> lk(s_mtx);
-            do_poll_locked(&s_snap);
+            std::lock_guard<std::mutex> lk(mtx_);
+            do_poll_locked(*this, &snap_);
         }
         int64_t elapsed = esp_timer_get_time() - t0;
         int64_t sleep_us = period_us - elapsed;
@@ -382,21 +377,27 @@ static void ai_task(void * /*arg*/)
     }
 }
 
-void request_refresh()
+void AiUsageWorker::task_trampoline(void *arg)
 {
-    if (s_worker_task) {
-        xTaskNotifyGive(s_worker_task);
+    static_cast<AiUsageWorker *>(arg)->task_loop();
+    vTaskDelete(nullptr);
+}
+
+void AiUsageWorker::request_refresh() noexcept
+{
+    if (task_) {
+        xTaskNotifyGive(task_);
     }
 }
 
-void start()
+void AiUsageWorker::start() noexcept
 {
     if (!enabled()) {
         ESP_LOGI(TAG, "no keys configured; AI Usage tab hidden");
         return;
     }
-    BaseType_t rc = xTaskCreate(ai_task, "ai_usage",
-                                TASK_STACK_BYTES, nullptr, 3, nullptr);
+    BaseType_t rc = xTaskCreate(task_trampoline, "ai_usage",
+                                TASK_STACK_BYTES, this, 3, nullptr);
     if (rc != pdPASS) {
         ESP_LOGE(TAG, "failed to create ai_usage task");
     } else {
@@ -404,11 +405,11 @@ void start()
     }
 }
 
-void get_snapshot(Snapshot *out)
+void AiUsageWorker::get_snapshot(Snapshot *out) noexcept
 {
     if (!out) return;
-    std::lock_guard<std::mutex> lk(s_mtx);
-    *out = s_snap;
+    std::lock_guard<std::mutex> lk(mtx_);
+    *out = snap_;
 }
 
 // ---------- UI: build_page / destroy_page -------------------------------
@@ -781,6 +782,39 @@ void register_page_handlers()
                               build_page, destroy_page);
     ESP_LOGI(TAG, "AIUsage page registered");
 }
+
+// ---------------------------------------------------------------------------
+// v0.8 Phase 2a: AiUsageWorker / AiUsagePage canonical singletons.
+// All worker state (snapshot, mutex, task handle, http client,
+// NVS-cached keys) lives on AiUsageWorker; the legacy free functions
+// (`start`, `get_snapshot`, `request_refresh`) are kept as thin
+// forwarders below so call sites in pet_ui.cpp / main.cpp need no
+// changes. AiUsagePage is the singleton UI façade — its own state
+// migration (BarWidgets / AiusageCtx → members) lands in a follow-up
+// commit.
+// ---------------------------------------------------------------------------
+
+AiUsageWorker &AiUsageWorker::instance() noexcept
+{
+    static AiUsageWorker s;
+    return s;
+}
+
+AiUsagePage &AiUsagePage::instance() noexcept
+{
+    static AiUsagePage s;
+    return s;
+}
+
+lv_obj_t *AiUsagePage::build(lv_obj_t *parent)    { return build_page(parent); }
+void      AiUsagePage::destroy(lv_obj_t *root)   { destroy_page(root); }
+void      AiUsagePage::register_handlers()       { register_page_handlers(); }
+
+// Legacy free-function wrappers. Kept stable so call sites in
+// pet_ui.cpp and main.cpp don't need to know about the class.
+void start()                      { AiUsageWorker::instance().start(); }
+void request_refresh()            { AiUsageWorker::instance().request_refresh(); }
+void get_snapshot(Snapshot *out) { AiUsageWorker::instance().get_snapshot(out); }
 
 }  // namespace ai_usage
 }  // namespace pet

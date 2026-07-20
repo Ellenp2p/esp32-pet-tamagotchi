@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include "lvgl.h"
 
+#include <mutex>
+
+#include "util/HttpClient.h"
+
 namespace pet {
 namespace ai_usage {
 
@@ -48,6 +52,62 @@ struct Snapshot {
     MiniMaxUsage minimax;
     int64_t      last_success_ms = 0;
     bool         refreshing      = false;
+};
+
+// v0.8 Phase 2a: class wrappers around the legacy free-function
+// implementations. These are the canonical entry points — the legacy
+// free functions in this header continue to work as one-line
+// forwarders so existing callers stay untouched.
+class AiUsageWorker {
+public:
+    static AiUsageWorker &instance() noexcept;
+
+    // Reflects the legacy enabled() / start() / get_snapshot() /
+    // request_refresh() behaviour; encapsulated here so the existing
+    // free functions can forward without behaviour change.
+    bool  enabled() noexcept;
+    void  start() noexcept;
+    void  get_snapshot(Snapshot *out) noexcept;
+    void  request_refresh() noexcept;
+
+private:
+    AiUsageWorker() = default;
+
+    // Free helpers need access to NVS-cached key buffers.
+    friend const char *effective_kimi_key(const AiUsageWorker &);
+    friend const char *effective_minimax_key(const AiUsageWorker &);
+
+    static void task_trampoline(void *arg);
+    void task_loop();
+    static void do_poll_locked(AiUsageWorker &w, Snapshot *s);
+    static void poll_kimi(AiUsageWorker &w, Snapshot *s);
+    static void poll_minimax(AiUsageWorker &w, Snapshot *s);
+
+    // Snapshot ownership — the canonical state lives here. Mutated
+    // only inside the worker thread or under mtx_; the UI copies
+    // out under the same lock via get_snapshot().
+    std::mutex   mtx_;
+    Snapshot     snap_{};
+    TaskHandle_t task_ = nullptr;
+
+    // NVS escape-hatch cache for API keys. Read once at start().
+    char         kimi_key_[160]    = {};
+    char         minimax_key_[160] = {};
+
+    // HTTP client + cached key resolution.
+    util::HttpClient http_;
+};
+
+class AiUsagePage {
+public:
+    static AiUsagePage &instance() noexcept;
+
+    lv_obj_t *build(lv_obj_t *parent);
+    void      destroy(lv_obj_t *root);
+    void      register_handlers();
+
+private:
+    AiUsagePage() = default;
 };
 
 bool enabled();
