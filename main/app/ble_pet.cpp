@@ -33,15 +33,11 @@ static const ble_uuid16_t pet_svc_uuid   = BLE_UUID16_INIT(0x1234);
 static const ble_uuid16_t state_chr_uuid = BLE_UUID16_INIT(0x1235);
 static const ble_uuid16_t cmd_chr_uuid   = BLE_UUID16_INIT(0x1236);
 
-static uint16_t state_chr_handle = 0;
-static uint16_t cmd_chr_handle   = 0;
-
-static uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static bool notify_subscribed = false;
-
-static int pet_access(uint16_t conn_handle, uint16_t attr_handle,
-                      struct ble_gatt_access_ctxt *ctxt, void *arg);
-static int pet_gap_event(struct ble_gap_event *event, void *arg);
+// NimBLE writes the assigned handles into these at registration time.
+// Kept as file-level statics because the static gatt_svcs[] table needs
+// to reference them by address (C API constraint).
+static uint16_t s_state_chr_handle = 0;
+static uint16_t s_cmd_chr_handle   = 0;
 
 static const struct ble_gatt_svc_def gatt_svcs[] = {
     {
@@ -50,23 +46,31 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
         .characteristics = (struct ble_gatt_chr_def[]){
             {
                 .uuid = &state_chr_uuid.u,
-                .access_cb = pet_access,
+                .access_cb = BlePet::pet_access,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
-                .val_handle = &state_chr_handle,
+                .val_handle = &s_state_chr_handle,
             },
             {
                 .uuid = &cmd_chr_uuid.u,
-                .access_cb = pet_access,
+                .access_cb = BlePet::pet_access,
                 .flags = BLE_GATT_CHR_F_WRITE,
-                .val_handle = &cmd_chr_handle,
+                .val_handle = &s_cmd_chr_handle,
             },
-            { 0 }, /* No more characteristics */
+            { 0 },
         },
     },
-    { 0 }, /* No more services */
+    { 0 },
 };
 
-static void update_state_mbuf(struct os_mbuf *om)
+// ---- singleton ----
+BlePet &BlePet::instance() noexcept
+{
+    static BlePet s;
+    return s;
+}
+
+// ---- helpers ----
+void BlePet::update_state_mbuf(struct os_mbuf *om)
 {
     pet::State s = pet::Pet::instance().get_state();
     uint8_t buf[5] = {
@@ -79,22 +83,23 @@ static void update_state_mbuf(struct os_mbuf *om)
     os_mbuf_append(om, buf, sizeof(buf));
 }
 
-static int pet_access(uint16_t conn_handle, uint16_t attr_handle,
-                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+// ---- callbacks ----
+int BlePet::pet_access(uint16_t conn_handle, uint16_t attr_handle,
+                       struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)arg;
     int rc;
 
     switch (ctxt->op) {
     case BLE_GATT_ACCESS_OP_READ_CHR:
-        if (attr_handle == state_chr_handle) {
-            update_state_mbuf(ctxt->om);
+        if (attr_handle == s_state_chr_handle) {
+            instance().update_state_mbuf(ctxt->om);
             return 0;
         }
         break;
 
     case BLE_GATT_ACCESS_OP_WRITE_CHR:
-        if (attr_handle == cmd_chr_handle) {
+        if (attr_handle == s_cmd_chr_handle) {
             uint8_t cmd = 0;
             rc = ble_hs_mbuf_to_flat(ctxt->om, &cmd, sizeof(cmd), nullptr);
             if (rc != 0) {
@@ -141,7 +146,7 @@ static int pet_access(uint16_t conn_handle, uint16_t attr_handle,
     return BLE_ATT_ERR_UNLIKELY;
 }
 
-static void pet_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
+void BlePet::pet_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
 {
     (void)arg;
     char buf[BLE_UUID_STR_LEN];
@@ -162,7 +167,7 @@ static void pet_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
     }
 }
 
-static void pet_advertise(void)
+void BlePet::advertise(void)
 {
     struct ble_gap_adv_params adv_params;
     struct ble_hs_adv_fields fields;
@@ -178,7 +183,7 @@ static void pet_advertise(void)
     fields.name_len = strlen(name);
     fields.name_is_complete = 1;
 
-    fields.uuids16 = &pet_svc_uuid;
+    fields.uuids16 = const_cast<ble_uuid16_t *>(&pet_svc_uuid);
     fields.num_uuids16 = 1;
     fields.uuids16_is_complete = 1;
 
@@ -206,9 +211,10 @@ static void pet_advertise(void)
     }
 }
 
-static int pet_gap_event(struct ble_gap_event *event, void *arg)
+int BlePet::pet_gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
+    auto &self = instance();
 
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
@@ -216,28 +222,28 @@ static int pet_gap_event(struct ble_gap_event *event, void *arg)
                  event->connect.status == 0 ? "established" : "failed",
                  event->connect.status);
         if (event->connect.status == 0) {
-            conn_handle = event->connect.conn_handle;
+            self.conn_handle_ = event->connect.conn_handle;
         } else {
-            pet_advertise();
+            self.advertise();
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "Disconnect reason=%d", event->disconnect.reason);
-        conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        notify_subscribed = false;
-        pet_advertise();
+        self.conn_handle_ = BLE_HS_CONN_HANDLE_NONE;
+        self.notify_subscribed_ = false;
+        self.advertise();
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI(TAG, "Advertise complete reason=%d", event->adv_complete.reason);
-        pet_advertise();
+        self.advertise();
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
-        if (event->subscribe.attr_handle == state_chr_handle) {
-            notify_subscribed = (event->subscribe.cur_notify != 0);
-            ESP_LOGI(TAG, "Notify subscription changed: %d", notify_subscribed);
+        if (event->subscribe.attr_handle == s_state_chr_handle) {
+            self.notify_subscribed_ = (event->subscribe.cur_notify != 0);
+            ESP_LOGI(TAG, "Notify subscription changed: %d", self.notify_subscribed_);
         }
         return 0;
 
@@ -246,7 +252,7 @@ static int pet_gap_event(struct ble_gap_event *event, void *arg)
     }
 }
 
-static void pet_on_sync(void)
+void BlePet::pet_on_sync(void)
 {
     int rc = ble_hs_util_ensure_addr(0);
     if (rc != 0) {
@@ -269,22 +275,24 @@ static void pet_on_sync(void)
                  addr_val[2], addr_val[1], addr_val[0]);
     }
 
-    pet_advertise();
+    instance().advertise();
 }
 
-static void pet_on_reset(int reason)
+void BlePet::pet_on_reset(int reason)
 {
     ESP_LOGE(TAG, "Resetting state; reason=%d", reason);
 }
 
-static void ble_host_task(void *param)
+void BlePet::ble_host_task(void *param)
 {
+    (void)param;
     ESP_LOGI(TAG, "BLE host task started");
     nimble_port_run();
     nimble_port_freertos_deinit();
 }
 
-esp_err_t init()
+// ---- public API ----
+esp_err_t BlePet::init()
 {
     int rc;
 
@@ -332,9 +340,9 @@ esp_err_t init()
     return ESP_OK;
 }
 
-void notify_state()
+void BlePet::notify_state()
 {
-    if (!notify_subscribed || conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+    if (!notify_subscribed_ || conn_handle_ == BLE_HS_CONN_HANDLE_NONE) {
         return;
     }
 
@@ -344,7 +352,7 @@ void notify_state()
     }
     update_state_mbuf(om);
 
-    int rc = ble_gatts_notify_custom(conn_handle, state_chr_handle, om);
+    int rc = ble_gatts_notify_custom(conn_handle_, s_state_chr_handle, om);
     if (rc != 0) {
         ESP_LOGW(TAG, "Failed to send notification; rc=%d", rc);
     }
