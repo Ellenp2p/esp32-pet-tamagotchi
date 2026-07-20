@@ -1,9 +1,9 @@
 #include "pet_ai_usage.h"
 #include "pet_pages.h"
 #include "wifi_manager.h"
+#include "util/HttpClient.h"
+#include "util/clock_util.h"
 
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -22,71 +22,15 @@ namespace ai_usage {
 
 static const char *TAG = "ai_usage";
 
-// Format epoch milliseconds as "MM-DD HH:MM" in local time (CST/UTC+8
-// hardcoded for the user's CN region; SNTP sync isn't required because
-// the values themselves are CN-region reset times). If ms <= 0, leaves
-// out empty.
-static void format_epoch_ms(int64_t ms, char *out, size_t sz)
-{
-    out[0] = 0;
-    if (ms <= 0) return;
-    time_t t = (time_t)(ms / 1000);
-    // Apply CN offset (UTC+8) so the displayed wall-clock matches the
-    // API's reset timestamps.
-    t += 8 * 3600;
-    struct tm tm;
-    gmtime_r(&t, &tm);
-    snprintf(out, sz, "%02d-%02d %02d:%02d",
-             tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
-}
+using clock_util::format_iso_utc_to_cn;
+using clock_util::format_epoch_ms_utc_to_cn;
 
-// Parse an ISO-8601 / RFC-3339 string like "2026-07-24T08:12:16.707786Z"
-// and render it as local CN wall-clock "MM-DD HH:MM" (UTC+8).
-//
-// The API always returns UTC ("...Z") — without an explicit offset
-// suffix. We sscanf the Y/M/D/H/M fields, treat them as UTC, and
-// shift by +8 hours, normalising across month and day boundaries.
-static void format_iso(const char *iso, char *out, size_t sz)
-{
-    if (!iso || !iso[0]) { out[0] = 0; return; }
-    int yr = 0, mo = 0, da = 0, hh = 0, mi = 0;
-    if (sscanf(iso, "%d-%d-%dT%d:%d", &yr, &mo, &da, &hh, &mi) < 5) {
-        out[0] = 0;
-        return;
-    }
-    // Convert UTC → CN (UTC+8). Add 8 hours then normalise into the
-    // right day using a small mday-from-epoch table so we don't pull
-    // in <time.h>'s mktime (which needs the system timezone set).
-    constexpr int8_t mdays[12] = {
-        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
-    };
-    auto is_leap = [](int y) {
-        return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
-    };
-    int mdays_y[12];
-    for (int i = 0; i < 12; i++) mdays_y[i] = mdays[i] + ((i == 1 && is_leap(yr)) ? 1 : 0);
-
-    hh += 8;
-    if (hh >= 24) {
-        hh -= 24;
-        da += 1;
-        if (da > mdays_y[mo - 1]) {
-            da = 1;
-            mo += 1;
-            if (mo > 12) { mo = 1; yr += 1; }
-        }
-    }
-    snprintf(out, sz, "%02d-%02d %02d:%02d", mo, da, hh, mi);
-}
-
-// 5 minutes between polls, 8 s HTTP timeout, 2 KB response buffer.
-// v0.6.7-fix: 12 KB task stack. mbedTLS cert verification during the
-// HTTPS handshake requires ~4 KB of working memory on top of the HTTP
-// parser + cJSON tree, which overflowed the previous 6 KB stack and
-// triggered a TASK stack-overflow abort.
-static constexpr int POLL_PERIOD_MS = 5 * 60 * 1000;
-static constexpr int HTTP_TIMEOUT_MS = 8000;
-static constexpr int RX_BUF = 2048;
+// 5 minutes between polls. v0.6.7-fix: 12 KB task stack — mbedTLS cert
+// verification during the HTTPS handshake needs ~4 KB of working
+// memory on top of the HTTP parser + cJSON tree, which overflowed the
+// previous 6 KB stack and triggered a TASK stack-overflow abort.
+static constexpr int POLL_PERIOD_MS    = 5 * 60 * 1000;
+static constexpr int RX_BUF           = 2048;
 static constexpr int TASK_STACK_BYTES = 12288;
 
 static std::mutex s_mtx;
@@ -142,51 +86,8 @@ static const char *effective_minimax_key()
     return s_minimax_key;
 }
 
-// ---------- HTTP fetch (one GET, accumulates body) -----------------------
-struct RxCtx { char *buf; int cap; int len; };
-
-static esp_err_t http_event(esp_http_client_event_t *e)
-{
-    auto *c = (RxCtx *)e->user_data;
-    if (e->event_id == HTTP_EVENT_ON_DATA && c->len + e->data_len < c->cap) {
-        memcpy(c->buf + c->len, e->data, e->data_len);
-        c->len += e->data_len;
-    }
-    return ESP_OK;
-}
-
-static esp_err_t fetch_json(const char *url, const char *bearer,
-                            char *out, int cap)
-{
-    RxCtx ctx{out, cap, 0};
-    esp_http_client_config_t cfg = {};
-    cfg.url = url;
-    cfg.timeout_ms = HTTP_TIMEOUT_MS;
-    cfg.event_handler = http_event;
-    cfg.user_data = &ctx;
-    // v0.6.7 fix: HTTPS cert verification. Without this, mbedTLS refuses
-    // to start the handshake ("No server verification option set") and
-    // every connect comes back as ESP_ERR_MBEDTLS_SSL_SETUP_FAILED.
-    // The x509 certificate bundle is built into the firmware by the
-    // default CONFIG_ESP_HTTPS_CERT_BUNDLE option enabled in sdkconfig.
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    if (!c) return ESP_ERR_NO_MEM;
-    char auth[200];
-    snprintf(auth, sizeof(auth), "Bearer %s", bearer);
-    esp_http_client_set_header(c, "Authorization", auth);
-    esp_http_client_set_header(c, "Content-Type", "application/json");
-    esp_err_t err = esp_http_client_perform(c);
-    int status = esp_err_to_name(err) ? esp_http_client_get_status_code(c) : 0;
-    esp_http_client_cleanup(c);
-    if (err != ESP_OK) return err;
-    if (status < 200 || status >= 300) {
-        ESP_LOGW(TAG, "HTTP %d from %s", status, url);
-        return ESP_FAIL;
-    }
-    out[ctx.len] = 0;
-    return ESP_OK;
-}
+// ---------- HTTP fetch (delegated to pet::util::HttpClient) -------------
+static util::HttpClient s_http;
 
 // ---------- JSON parsing: Kimi ------------------------------------------
 static int64_t cjson_str_to_i64(const cJSON *v)
@@ -206,15 +107,16 @@ static void poll_kimi(Snapshot *s, const char *key)
 {
     char body[RX_BUF];
     ESP_LOGI(TAG, "kimi: GET /usages");
-    esp_err_t err = fetch_json("https://api.kimi.com/coding/v1/usages",
-                               key, body, sizeof(body));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "kimi: http err=%s", esp_err_to_name(err));
+    auto resp = s_http.fetch("https://api.kimi.com/coding/v1/usages",
+                             key, body, sizeof(body));
+    if (!resp.ok()) {
+        ESP_LOGE(TAG, "kimi: http err=%s status=%d",
+                 esp_err_to_name(resp.err), resp.status);
         s->kimi.any_ok = false;
         s->kimi.weekly.ok = false;
         s->kimi.five_hours.ok = false;
         snprintf(s->kimi.err, sizeof(s->kimi.err), "http:%s",
-                 esp_err_to_name(err));
+                 resp.err == ESP_OK ? "status" : esp_err_to_name(resp.err));
         return;
     }
     ESP_LOGI(TAG, "kimi: body %d bytes", (int)strlen(body));
@@ -235,8 +137,8 @@ static void poll_kimi(Snapshot *s, const char *key)
             strncpy(s->kimi.weekly.reset_iso, rst->valuestring,
                     sizeof(s->kimi.weekly.reset_iso) - 1);
             s->kimi.weekly.reset_iso[sizeof(s->kimi.weekly.reset_iso) - 1] = 0;
-            format_iso(rst->valuestring, s->kimi.weekly.reset_human,
-                       sizeof(s->kimi.weekly.reset_human));
+            format_iso_utc_to_cn(rst->valuestring, s->kimi.weekly.reset_human,
+                                  sizeof(s->kimi.weekly.reset_human));
         }
         if (s->kimi.weekly.limit > 0 && s->kimi.weekly.remaining >= 0) {
             s->kimi.weekly.used = s->kimi.weekly.limit - s->kimi.weekly.remaining;
@@ -269,8 +171,8 @@ static void poll_kimi(Snapshot *s, const char *key)
                 strncpy(s->kimi.five_hours.reset_iso, rst5->valuestring,
                         sizeof(s->kimi.five_hours.reset_iso) - 1);
                 s->kimi.five_hours.reset_iso[sizeof(s->kimi.five_hours.reset_iso) - 1] = 0;
-                format_iso(rst5->valuestring, s->kimi.five_hours.reset_human,
-                           sizeof(s->kimi.five_hours.reset_human));
+                format_iso_utc_to_cn(rst5->valuestring, s->kimi.five_hours.reset_human,
+                                      sizeof(s->kimi.five_hours.reset_human));
             }
             s->kimi.five_hours.ok = (s->kimi.five_hours.limit > 0 &&
                                       s->kimi.five_hours.remaining >= 0);
@@ -322,8 +224,8 @@ static void fill_minimax(MiniMaxUsage *m, cJSON *it)
     cJSON *wk_end = cJSON_GetObjectItemCaseSensitive(it, "weekly_end_time");
     if (cJSON_IsNumber(wk_end)) {
         int64_t ms = (int64_t)wk_end->valuedouble;
-        format_epoch_ms(ms, m->weekly.reset_human,
-                        sizeof(m->weekly.reset_human));
+        format_epoch_ms_utc_to_cn(ms, m->weekly.reset_human,
+                                  sizeof(m->weekly.reset_human));
     }
 
     cJSON *iv = cJSON_GetObjectItemCaseSensitive(it, "current_interval_remaining_percent");
@@ -343,8 +245,8 @@ static void fill_minimax(MiniMaxUsage *m, cJSON *it)
     cJSON *iv_end = cJSON_GetObjectItemCaseSensitive(it, "end_time");
     if (cJSON_IsNumber(iv_end)) {
         int64_t ms = (int64_t)iv_end->valuedouble;
-        format_epoch_ms(ms, m->five_hours.reset_human,
-                        sizeof(m->five_hours.reset_human));
+        format_epoch_ms_utc_to_cn(ms, m->five_hours.reset_human,
+                                  sizeof(m->five_hours.reset_human));
     }
 }
 
@@ -352,14 +254,14 @@ static void poll_minimax(Snapshot *s, const char *key)
 {
     char body[RX_BUF];
     ESP_LOGI(TAG, "minimax: GET /token_plan/remains");
-    esp_err_t err = fetch_json("https://www.minimaxi.com/v1/token_plan/remains",
-                               key, body, sizeof(body));
-    if (err != ESP_OK) {
+    auto resp = s_http.fetch("https://www.minimaxi.com/v1/token_plan/remains",
+                             key, body, sizeof(body));
+    if (!resp.ok()) {
         s->minimax.any_ok = false;
         s->minimax.weekly.ok = false;
         s->minimax.five_hours.ok = false;
         snprintf(s->minimax.err, sizeof(s->minimax.err), "http:%s",
-                 esp_err_to_name(err));
+                 resp.err == ESP_OK ? "status" : esp_err_to_name(resp.err));
         return;
     }
     cJSON *root = cJSON_Parse(body);
