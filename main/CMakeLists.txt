@@ -21,6 +21,7 @@ idf_component_register(SRCS "main.cpp"
                              "app/screen_power.cpp"
                              "app/util/HttpClient.cpp"
                              "app/util/clock_util.cpp"
+                             "app/ui_main_task.cpp"
                     PRIV_REQUIRES driver esp_driver_gpio esp_driver_spi esp_driver_ledc esp_driver_i2c esp_lcd espressif__esp_lcd_touch espressif__esp_lvgl_port lvgl__lvgl heap esp_timer nvs_flash esp_wifi esp_event esp_netif bt espressif__cjson esp_http_client mbedtls
                     INCLUDE_DIRS ".")
 

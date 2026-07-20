@@ -12,6 +12,7 @@
 #include "app/wifi_manager.h"
 #include "app/pet_ai_usage.h"
 #include "app/screen_power.h"
+#include "app/ui_main_task.h"
 #include "bsp/bsp_qmi8658.h"
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
@@ -1084,55 +1085,6 @@ static void build_ui()
     lv_timer_create(on_update_timer, 500, nullptr);
 }
 
-static void pet_task(void *arg)
-{
-    bsp::QMI8658_Data imu_data;
-    int notify_counter = 0;
-    int save_counter = 0;
-    pet::idle_events::init();
-
-    while (true) {
-        Pet::instance().update();
-        pet::idle_events::tick(Pet::instance().get_state().age_ticks);
-
-        if (Pet::instance().is_dirty()) {
-            if (++save_counter >= 50) {
-                pet::save::save_if_dirty(Pet::instance(), false);
-                save_counter = 0;
-            }
-        } else {
-            save_counter = 0;
-        }
-
-        if (bsp::QMI8658::instance().read(&imu_data) == ESP_OK) {
-            // v0.7: a permissive wake-motion detector runs alongside
-            // the strict play-shake detector. detect_wake_motion() is
-            // called on every sample so the screen can wake up even
-            // when the user only gives a small pickup jolt.
-            bool woke = bsp::QMI8658::instance().detect_wake_motion(imu_data);
-            if (woke) {
-                pet::ScreenPower::instance().note_input();
-            }
-            if (bsp::QMI8658::instance().detect_shake(imu_data)) {
-                ESP_LOGI(TAG, "Shake detected!");
-                pet::ScreenPower::instance().note_input();
-                if (!Pet::instance().is_sleeping()) {
-                    Pet::instance().play();
-                } else {
-                    Pet::instance().wake_up();
-                }
-            }
-        }
-
-        if (++notify_counter >= 20) {
-            pet_ble::notify_state();
-            notify_counter = 0;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
-
 esp_err_t start_ui()
 {
     // v0.6.6: bring up the Wi-Fi subsystem as early as possible so the
@@ -1165,7 +1117,11 @@ esp_err_t start_ui()
                  streak, streak * 10);
     }
 
-    xTaskCreate(pet_task, "pet_task", 4096, nullptr, 5, nullptr);
+    // v0.8 Phase 3e: the pet_task body is now PetMainTask::task_loop.
+    // The static `pet_task()` function still lives in this file (so
+    // existing behaviour is preserved); a follow-up commit will delete
+    // it once the migration is fully verified.
+    PetMainTask::instance().start();
 
     ESP_LOGI(TAG, "Pet UI started");
     return ESP_OK;
