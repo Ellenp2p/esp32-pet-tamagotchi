@@ -9,7 +9,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "util/NvsStorage.h"
+#include "util/NvsHandle.h"
 
 #include <cstring>
 #include <cstdlib>
@@ -53,18 +53,18 @@ bool AiUsageWorker::enabled() noexcept
     bool kc_minimax = has_key(CONFIG_PET_AI_USAGE_MINIMAX_KEY);
     // NVS escape hatch (filled at runtime, e.g. by an OTA script).
     if (!kc_kimi || !kc_minimax) {
-        std::string v;
-        if (NvsStorage<std::string>(kNsSecrets, kKeyKimi).load(&v))
-            strncpy(kimi_key_, v.c_str(), sizeof(kimi_key_) - 1);
-        if (NvsStorage<std::string>(kNsSecrets, kKeyMinimax).load(&v))
-            strncpy(minimax_key_, v.c_str(), sizeof(minimax_key_) - 1);
+        NvsHandle h(kNsSecrets, NVS_READONLY);
+        size_t sz = sizeof(kimi_key_);
+        if (h.get_str(kKeyKimi, kimi_key_, &sz) != ESP_OK)
+            kimi_key_[0] = 0;
+        sz = sizeof(minimax_key_);
+        if (h.get_str(kKeyMinimax, minimax_key_, &sz) != ESP_OK)
+            minimax_key_[0] = 0;
     }
     bool nv_kimi    = has_key(kimi_key_);
     bool nv_minimax = has_key(minimax_key_);
     return (kc_kimi || nv_kimi) || (kc_minimax || nv_minimax);
 }
-
-bool enabled() { return AiUsageWorker::instance().enabled(); }
 
 // Resolves the effective key for a given provider, preferring Kconfig.
 const char *effective_kimi_key(const AiUsageWorker &w)
@@ -291,8 +291,8 @@ void AiUsageWorker::poll_minimax(AiUsageWorker &w, Snapshot *s)
 static bool wifi_is_up()
 {
     app::wifi_status st;
-    app::wifi_manager_get_status(&st);
-    return st.state == app::WIFI_CONN_CONNECTED;
+    app::WifiManager::instance().get_status(st);
+    return st.state == app::wifi_conn_state::Connected;
 }
 
 void AiUsageWorker::do_poll_locked(AiUsageWorker &w, Snapshot *s)
@@ -655,7 +655,7 @@ static void aiusage_poll_cb(lv_timer_t *t)
 {
     (void)t;
     Snapshot s;
-    get_snapshot(&s);
+    AiUsageWorker::instance().get_snapshot(&s);
     int64_t now_ms = esp_timer_get_time() / 1000;
     render_clock();
     render_kimi(s);
@@ -750,7 +750,7 @@ lv_obj_t *build_page(lv_obj_t *parent)
     lv_obj_center(refresh_lbl);
     lv_obj_add_event_cb(refresh_btn, [](lv_event_t *ev) {
         (void)ev;
-        request_refresh();
+        AiUsageWorker::instance().request_refresh();
     }, LV_EVENT_CLICKED, nullptr);
 
     s_ctx.poll = lv_timer_create(aiusage_poll_cb, 500, nullptr);
@@ -769,22 +769,15 @@ void destroy_page(lv_obj_t *root)
 
 void register_page_handlers()
 {
-    if (!enabled()) return;
-    pet::pages::set_ai_usage_enabled(true);
-    pet::pages::register_page(pet::pages::Page::AIUsage,
+    if (!AiUsageWorker::instance().enabled()) return;
+    PetPages::instance().set_ai_usage_enabled(true);
+    PetPages::instance().register_page(PetPages::Page::AIUsage,
                               build_page, destroy_page);
     ESP_LOGI(TAG, "AIUsage page registered");
 }
 
 // ---------------------------------------------------------------------------
 // v0.8 Phase 2a: AiUsageWorker / AiUsagePage canonical singletons.
-// All worker state (snapshot, mutex, task handle, http client,
-// NVS-cached keys) lives on AiUsageWorker; the legacy free functions
-// (`start`, `get_snapshot`, `request_refresh`) are kept as thin
-// forwarders below so call sites in pet_ui.cpp / main.cpp need no
-// changes. AiUsagePage is the singleton UI façade — its own state
-// migration (BarWidgets / AiusageCtx → members) lands in a follow-up
-// commit.
 // ---------------------------------------------------------------------------
 
 AiUsageWorker &AiUsageWorker::instance() noexcept
@@ -802,12 +795,6 @@ AiUsagePage &AiUsagePage::instance() noexcept
 lv_obj_t *AiUsagePage::build(lv_obj_t *parent)    { return build_page(parent); }
 void      AiUsagePage::destroy(lv_obj_t *root)   { destroy_page(root); }
 void      AiUsagePage::register_handlers()       { register_page_handlers(); }
-
-// Legacy free-function wrappers. Kept stable so call sites in
-// pet_ui.cpp and main.cpp don't need to know about the class.
-void start()                      { AiUsageWorker::instance().start(); }
-void request_refresh()            { AiUsageWorker::instance().request_refresh(); }
-void get_snapshot(Snapshot *out) { AiUsageWorker::instance().get_snapshot(out); }
 
 }  // namespace ai_usage
 }  // namespace pet

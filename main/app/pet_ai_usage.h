@@ -54,17 +54,12 @@ struct Snapshot {
     bool         refreshing      = false;
 };
 
-// v0.8 Phase 2a: class wrappers around the legacy free-function
-// implementations. These are the canonical entry points — the legacy
-// free functions in this header continue to work as one-line
-// forwarders so existing callers stay untouched.
+// Periodic HTTP poller for Kimi + MiniMax API usage quotas. Owns the
+// worker task, NVS-cached API keys, and the usage Snapshot.
 class AiUsageWorker {
 public:
     static AiUsageWorker &instance() noexcept;
 
-    // Reflects the legacy enabled() / start() / get_snapshot() /
-    // request_refresh() behaviour; encapsulated here so the existing
-    // free functions can forward without behaviour change.
     bool  enabled() noexcept;
     void  start() noexcept;
     void  get_snapshot(Snapshot *out) noexcept;
@@ -109,15 +104,5 @@ public:
 private:
     AiUsagePage() = default;
 };
-
-bool enabled();
-void start();
-void get_snapshot(Snapshot *out);
-void request_refresh();
-
-lv_obj_t *build_page(lv_obj_t *parent);
-void      destroy_page(lv_obj_t *root);
-void      register_page_handlers();
-
 }  // namespace ai_usage
 }  // namespace pet

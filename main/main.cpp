@@ -40,7 +40,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(lvgl_app::init());
 
     // Build the pet UI and start its logic task.
-    ESP_ERROR_CHECK(pet::start_ui());
+    ESP_ERROR_CHECK(pet::PetUi::start_ui());
 
     // v0.7: BOOT-key ISR driver + idle-aware screen-off power manager.
     // BootKey must come first — screen_power's worker reads from its queue.
@@ -49,7 +49,7 @@ extern "C" void app_main(void)
 
     // v0.6.7: AI usage polling task (5 min). No-op when no API keys
     // are configured; the AIUsage tab itself is also hidden in that case.
-    pet::ai_usage::start();
+    pet::ai_usage::AiUsageWorker::instance().start();
 
     ESP_LOGI(TAG, "Init complete");
 }
