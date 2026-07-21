@@ -40,7 +40,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(lvgl_app::init());
 
     // Build the pet UI and start its logic task.
-    ESP_ERROR_CHECK(pet::start_ui());
+    ESP_ERROR_CHECK(pet::PetUi::start_ui());
 
     // v0.7: BOOT-key ISR driver + idle-aware screen-off power manager.
     // BootKey must come first — screen_power's worker reads from its queue.
