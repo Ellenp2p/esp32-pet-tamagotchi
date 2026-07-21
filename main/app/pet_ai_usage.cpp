@@ -64,8 +64,6 @@ bool AiUsageWorker::enabled() noexcept
     return (kc_kimi || nv_kimi) || (kc_minimax || nv_minimax);
 }
 
-bool enabled() { return AiUsageWorker::instance().enabled(); }
-
 // Resolves the effective key for a given provider, preferring Kconfig.
 const char *effective_kimi_key(const AiUsageWorker &w)
 {
@@ -291,7 +289,7 @@ void AiUsageWorker::poll_minimax(AiUsageWorker &w, Snapshot *s)
 static bool wifi_is_up()
 {
     app::wifi_status st;
-    app::wifi_manager_get_status(&st);
+    app::WifiManager::instance().get_status(&st);
     return st.state == app::WIFI_CONN_CONNECTED;
 }
 
@@ -655,7 +653,7 @@ static void aiusage_poll_cb(lv_timer_t *t)
 {
     (void)t;
     Snapshot s;
-    get_snapshot(&s);
+    AiUsageWorker::instance().get_snapshot(&s);
     int64_t now_ms = esp_timer_get_time() / 1000;
     render_clock();
     render_kimi(s);
@@ -750,7 +748,7 @@ lv_obj_t *build_page(lv_obj_t *parent)
     lv_obj_center(refresh_lbl);
     lv_obj_add_event_cb(refresh_btn, [](lv_event_t *ev) {
         (void)ev;
-        request_refresh();
+        AiUsageWorker::instance().request_refresh();
     }, LV_EVENT_CLICKED, nullptr);
 
     s_ctx.poll = lv_timer_create(aiusage_poll_cb, 500, nullptr);
@@ -769,7 +767,7 @@ void destroy_page(lv_obj_t *root)
 
 void register_page_handlers()
 {
-    if (!enabled()) return;
+    if (!AiUsageWorker::instance().enabled()) return;
     pet::pages::set_ai_usage_enabled(true);
     pet::pages::register_page(pet::pages::Page::AIUsage,
                               build_page, destroy_page);
@@ -778,13 +776,6 @@ void register_page_handlers()
 
 // ---------------------------------------------------------------------------
 // v0.8 Phase 2a: AiUsageWorker / AiUsagePage canonical singletons.
-// All worker state (snapshot, mutex, task handle, http client,
-// NVS-cached keys) lives on AiUsageWorker; the legacy free functions
-// (`start`, `get_snapshot`, `request_refresh`) are kept as thin
-// forwarders below so call sites in pet_ui.cpp / main.cpp need no
-// changes. AiUsagePage is the singleton UI façade — its own state
-// migration (BarWidgets / AiusageCtx → members) lands in a follow-up
-// commit.
 // ---------------------------------------------------------------------------
 
 AiUsageWorker &AiUsageWorker::instance() noexcept
@@ -802,12 +793,6 @@ AiUsagePage &AiUsagePage::instance() noexcept
 lv_obj_t *AiUsagePage::build(lv_obj_t *parent)    { return build_page(parent); }
 void      AiUsagePage::destroy(lv_obj_t *root)   { destroy_page(root); }
 void      AiUsagePage::register_handlers()       { register_page_handlers(); }
-
-// Legacy free-function wrappers. Kept stable so call sites in
-// pet_ui.cpp and main.cpp don't need to know about the class.
-void start()                      { AiUsageWorker::instance().start(); }
-void request_refresh()            { AiUsageWorker::instance().request_refresh(); }
-void get_snapshot(Snapshot *out) { AiUsageWorker::instance().get_snapshot(out); }
 
 }  // namespace ai_usage
 }  // namespace pet

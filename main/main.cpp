@@ -49,7 +49,7 @@ extern "C" void app_main(void)
 
     // v0.6.7: AI usage polling task (5 min). No-op when no API keys
     // are configured; the AIUsage tab itself is also hidden in that case.
-    pet::ai_usage::start();
+    pet::ai_usage::AiUsageWorker::instance().start();
 
     ESP_LOGI(TAG, "Init complete");
 }

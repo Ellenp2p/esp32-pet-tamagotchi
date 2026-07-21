@@ -14,7 +14,6 @@ namespace pet_ble {
 
 // Singleton wrapper around the NimBLE GATT service (0x1234).
 // Owns the BLE host task, GATT service definitions, and connection state.
-// All public API functions also exist as legacy forwarders (pet_ble::*).
 class BlePet {
 public:
     static BlePet &instance() noexcept;
@@ -45,9 +44,5 @@ private:
     uint16_t conn_handle_ = 0xFFFF;
     bool notify_subscribed_ = false;
 };
-
-// Legacy forwarders so existing callers need no changes.
-inline esp_err_t init() { return BlePet::instance().init(); }
-inline void notify_state() { BlePet::instance().notify_state(); }
 
 } // namespace pet_ble

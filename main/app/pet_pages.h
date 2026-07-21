@@ -26,7 +26,7 @@ int  page_count();
 // running. The AIUsage tab is drawn only when this is true.
 bool ai_usage_enabled();
 
-// Flip the runtime flag. Called from pet_ai_usage::register_page_handlers
+// Flip the runtime flag. Called from AiUsagePage::register_handlers
 // after deciding whether to mount the page.
 void set_ai_usage_enabled(bool on);
 

@@ -192,7 +192,7 @@ static void update_ui()
     //   IDLE/DISCON -> grey   "WiFi:--"
     if (wifi_label_) {
         app::wifi_status ws;
-        app::wifi_manager_get_status(&ws);
+        app::WifiManager::instance().get_status(&ws);
         char wbuf[40];
         const char *color_hex = "90A4AE";  // dim grey
         switch (ws.state) {
@@ -276,7 +276,7 @@ static lv_obj_t *build_page_status(lv_obj_t *parent)
     lv_obj_align(status_label_, LV_ALIGN_TOP_LEFT, 108, 4);
 
     // Top-right WiFi indicator — small badge showing connection state.
-    // Updated by pet_task from wifi_manager_get_status().
+    // Updated by pet_task from WifiManager::get_status().
     wifi_label_ = lv_label_create(root);
     lv_obj_set_style_text_font(wifi_label_, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(wifi_label_, lv_color_hex(0x90A4AE), 0);  // dim grey
@@ -623,7 +623,7 @@ static void settings_poll_cb(lv_timer_t *t)
     (void)t;
     refresh_settings_status();
     app::wifi_status st;
-    app::wifi_manager_get_status(&st);
+    app::WifiManager::instance().get_status(&st);
     // v0.6.6 fix: rebuild the AP list whenever SCAN_DONE transitions us
     // out of SCANNING. The list is built once at page entry; without this
     // the user is stuck on "(no scan results)" even though s_scan_count>0.
@@ -638,7 +638,7 @@ static void refresh_settings_status()
 {
     if (!s_settings.status_label) return;
     app::wifi_status st;
-    app::wifi_manager_get_status(&st);
+    app::WifiManager::instance().get_status(&st);
     const char *state_str = "?";
     switch (st.state) {
         case app::WIFI_CONN_IDLE:        state_str = "Idle";        break;
@@ -662,10 +662,10 @@ static void rebuild_ap_list()
 {
     if (!s_settings.list) return;
     lv_obj_clean(s_settings.list);
-    int n = app::wifi_manager_scan_count();
-    const wifi_ap_record_t *aps = app::wifi_manager_scan_results();
+    int n = app::WifiManager::instance().scan_count();
+    const wifi_ap_record_t *aps = app::WifiManager::instance().scan_results();
     app::wifi_status st;
-    app::wifi_manager_get_status(&st);
+    app::WifiManager::instance().get_status(&st);
     for (int i = 0; i < n; i++) {
         // Skip hidden / empty SSIDs.
         if (aps[i].ssid[0] == 0) continue;
@@ -732,20 +732,20 @@ static void rebuild_ap_list()
 static void on_rescan_clicked(lv_event_t *e)
 {
     (void)e;
-    app::wifi_manager_scan_start();
+    app::WifiManager::instance().scan_start();
 }
 
 static void on_disconnect_clicked(lv_event_t *e)
 {
     (void)e;
-    app::wifi_manager_disconnect();
+    app::WifiManager::instance().disconnect();
     refresh_settings_status();
 }
 
 static void on_forget_clicked(lv_event_t *e)
 {
     (void)e;
-    app::wifi_manager_forget();
+    app::WifiManager::instance().forget();
     refresh_settings_status();
 }
 
@@ -822,8 +822,8 @@ static void on_connect_clicked(lv_event_t *e)
         close_pass_popup();
         return;
     }
-    esp_err_t rc = app::wifi_manager_connect(s_settings.pass_ssid, pass);
-    ESP_LOGI("pet_ui", "wifi_manager_connect rc=%s",
+    esp_err_t rc = app::WifiManager::instance().connect(s_settings.pass_ssid, pass);
+    ESP_LOGI("pet_ui", "WifiManager::connect rc=%s",
              esp_err_to_name(rc));
     close_pass_popup();
     refresh_settings_status();
@@ -864,7 +864,7 @@ static void on_ap_clicked(lv_event_t *e)
     // field blank.
     char saved_ssid[33] = {};
     char saved_pass[64] = {};
-    if (app::wifi_manager_get_saved_credentials(saved_ssid, sizeof(saved_ssid),
+    if (app::WifiManager::instance().get_saved_credentials(saved_ssid, sizeof(saved_ssid),
                                                 saved_pass, sizeof(saved_pass))
         && strcmp(saved_ssid, ssid) == 0
         && saved_pass[0] != 0) {
@@ -1054,7 +1054,7 @@ static void build_ui()
     pet::pages::register_page(pet::pages::Page::Shop,     build_page_shop,     nullptr);
     pet::pages::register_page(pet::pages::Page::Settings, build_page_settings, destroy_page_settings);
     // v0.6.7: AI Usage tab — no-op when no keys are configured.
-    pet::ai_usage::register_page_handlers();
+    pet::ai_usage::AiUsagePage::instance().register_handlers();
 
     pet::pages::build_tabs(screen);
     pet::pages::switch_page(pet::pages::Page::Status);
@@ -1070,7 +1070,7 @@ esp_err_t start_ui()
     // NVS has saved credentials) kicks off the auto-connect on its own
     // thread. We deliberately call it before building the LVGL UI so
     // the first scan/connect doesn't stall the boot sequence.
-    app::wifi_manager_init();
+    app::WifiManager::instance().init();
 
     if (lvgl_port_lock(0)) {
         build_ui();

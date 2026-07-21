@@ -30,9 +30,7 @@ enum wifi_conn_state {
 };
 
 // Singleton wrapper around the Wi-Fi subsystem. Owns the event loop, the
-// worker task, and all scan/connect state. All public API functions also
-// exist as legacy free-function forwarders (wifi_manager_*) so existing
-// callers need no changes.
+// worker task, and all scan/connect state.
 class WifiManager {
 public:
     static WifiManager &instance() noexcept;
@@ -99,48 +97,4 @@ private:
     char                nvs_password_[64] = {};
     TaskHandle_t        task_          = nullptr;
 };
-
-// ---- legacy free-function forwarders ----
-inline esp_err_t wifi_manager_init()
-{
-    return WifiManager::instance().init();
-}
-inline void wifi_manager_get_status(wifi_status *out)
-{
-    WifiManager::instance().get_status(out);
-}
-inline esp_err_t wifi_manager_scan_start()
-{
-    return WifiManager::instance().scan_start();
-}
-inline bool wifi_manager_is_scan_done()
-{
-    return WifiManager::instance().is_scan_done();
-}
-inline int wifi_manager_scan_count()
-{
-    return WifiManager::instance().scan_count();
-}
-inline const wifi_ap_record_t *wifi_manager_scan_results()
-{
-    return WifiManager::instance().scan_results();
-}
-inline esp_err_t wifi_manager_connect(const char *ssid, const char *password)
-{
-    return WifiManager::instance().connect(ssid, password);
-}
-inline esp_err_t wifi_manager_disconnect()
-{
-    return WifiManager::instance().disconnect();
-}
-inline esp_err_t wifi_manager_forget()
-{
-    return WifiManager::instance().forget();
-}
-inline bool wifi_manager_get_saved_credentials(char *out_ssid, size_t ssid_sz,
-                                               char *out_pass, size_t pass_sz)
-{
-    return WifiManager::instance().get_saved_credentials(out_ssid, ssid_sz, out_pass, pass_sz);
-}
-
 } // namespace app

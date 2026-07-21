@@ -19,7 +19,7 @@ static Page s_current = Page::Status;
 static lv_obj_t *s_tabs[(int)Page::Count] = {nullptr};
 static lv_obj_t *s_content = nullptr;
 
-// v0.6.7: runtime flag toggled by pet_ai_usage::register_page_handlers.
+// v0.6.7: runtime flag toggled by AiUsagePage::register_handlers.
 // When false, the AIUsage tab is hidden (page_count() returns 4) and its
 // build/destroy handler slot stays unused.
 static bool s_ai_enabled = false;

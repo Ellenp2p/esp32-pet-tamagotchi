@@ -65,7 +65,7 @@ void PetMainTask::task_loop()
         }
 
         if (++notify_counter >= 20) {
-            pet_ble::notify_state();
+            pet_ble::BlePet::instance().notify_state();
             notify_counter = 0;
         }
 
