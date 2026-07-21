@@ -35,7 +35,7 @@ public:
     static WifiManager &instance() noexcept;
 
     esp_err_t init();
-    void get_status(wifi_status *out);
+    void get_status(wifi_status &out);
     esp_err_t scan_start();
     bool      is_scan_done();
     int       scan_count();

@@ -169,7 +169,7 @@ void PetUi::update_ui()
 
     if (self.wifi_label_) {
         app::wifi_status ws;
-        app::WifiManager::instance().get_status(&ws);
+        app::WifiManager::instance().get_status(ws);
         char wbuf[40];
         const char *color_hex = "90A4AE";
         switch (ws.state) {
@@ -548,7 +548,7 @@ void PetUi::refresh_settings_status()
     auto &self = instance();
     if (!self.settings_.status_label) return;
     app::wifi_status st;
-    app::WifiManager::instance().get_status(&st);
+    app::WifiManager::instance().get_status(st);
     const char *state_str = "?";
     switch (st.state) {
         case app::wifi_conn_state::Idle:        state_str = "Idle";        break;
@@ -590,7 +590,7 @@ void PetUi::rebuild_ap_list()
     int n = app::WifiManager::instance().scan_count();
     const wifi_ap_record_t *aps = app::WifiManager::instance().scan_results();
     app::wifi_status st;
-    app::WifiManager::instance().get_status(&st);
+    app::WifiManager::instance().get_status(st);
     for (int i = 0; i < n; i++) {
         if (aps[i].ssid[0] == 0) continue;
         char label[64];
@@ -643,7 +643,7 @@ void PetUi::settings_poll_cb(lv_timer_t *t)
     auto &self = instance();
     refresh_settings_status();
     app::wifi_status st;
-    app::WifiManager::instance().get_status(&st);
+    app::WifiManager::instance().get_status(st);
     if (self.last_state_ == app::wifi_conn_state::Scanning &&
         st.state != app::wifi_conn_state::Scanning) {
         rebuild_ap_list();

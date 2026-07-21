@@ -323,10 +323,9 @@ esp_err_t WifiManager::init()
     return ESP_OK;
 }
 
-void WifiManager::get_status(wifi_status *out)
+void WifiManager::get_status(wifi_status &out)
 {
-    if (!out) return;
-    *out = status_;
+    out = status_;
 }
 
 esp_err_t WifiManager::scan_start()
