@@ -292,7 +292,7 @@ static bool wifi_is_up()
 {
     app::wifi_status st;
     app::WifiManager::instance().get_status(&st);
-    return st.state == app::WIFI_CONN_CONNECTED;
+    return st.state == app::wifi_conn_state::Connected;
 }
 
 void AiUsageWorker::do_poll_locked(AiUsageWorker &w, Snapshot *s)

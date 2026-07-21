@@ -196,24 +196,24 @@ static void update_ui()
         char wbuf[40];
         const char *color_hex = "90A4AE";  // dim grey
         switch (ws.state) {
-            case app::WIFI_CONN_CONNECTED:
+            case app::wifi_conn_state::Connected:
                 snprintf(wbuf, sizeof(wbuf), "WiFi:%s", ws.ssid);
                 color_hex = "66BB6A";  // green
                 break;
-            case app::WIFI_CONN_CONNECTING:
+            case app::wifi_conn_state::Connecting:
                 snprintf(wbuf, sizeof(wbuf), "WiFi:...");
                 color_hex = "FFD54F";  // amber
                 break;
-            case app::WIFI_CONN_SCANNING:
+            case app::wifi_conn_state::Scanning:
                 snprintf(wbuf, sizeof(wbuf), "WiFi:scan");
                 color_hex = "FFD54F";
                 break;
-            case app::WIFI_CONN_FAILED:
+            case app::wifi_conn_state::Failed:
                 snprintf(wbuf, sizeof(wbuf), "WiFi:!");
                 color_hex = "EF5350";  // red
                 break;
-            case app::WIFI_CONN_DISCONNECTED:
-            case app::WIFI_CONN_IDLE:
+            case app::wifi_conn_state::Disconnected:
+            case app::wifi_conn_state::Idle:
             default:
                 snprintf(wbuf, sizeof(wbuf), "WiFi:--");
                 color_hex = "90A4AE";  // grey
@@ -615,7 +615,7 @@ static void refresh_timeout_label();
 
 // One-shot lvgl timer that polls wifi_manager state and refreshes the UI.
 static lv_timer_t *s_settings_poll = nullptr;
-static int s_last_state = -1;
+static app::wifi_conn_state s_last_state = static_cast<app::wifi_conn_state>(-1);
 static void rebuild_ap_list();
 
 static void settings_poll_cb(lv_timer_t *t)
@@ -627,8 +627,8 @@ static void settings_poll_cb(lv_timer_t *t)
     // v0.6.6 fix: rebuild the AP list whenever SCAN_DONE transitions us
     // out of SCANNING. The list is built once at page entry; without this
     // the user is stuck on "(no scan results)" even though s_scan_count>0.
-    if (s_last_state == app::WIFI_CONN_SCANNING &&
-        st.state != app::WIFI_CONN_SCANNING) {
+    if (s_last_state == app::wifi_conn_state::Scanning &&
+        st.state != app::wifi_conn_state::Scanning) {
         rebuild_ap_list();
     }
     s_last_state = st.state;
@@ -641,12 +641,12 @@ static void refresh_settings_status()
     app::WifiManager::instance().get_status(&st);
     const char *state_str = "?";
     switch (st.state) {
-        case app::WIFI_CONN_IDLE:        state_str = "Idle";        break;
-        case app::WIFI_CONN_SCANNING:    state_str = "Scanning";    break;
-        case app::WIFI_CONN_CONNECTING:  state_str = "Connecting";  break;
-        case app::WIFI_CONN_CONNECTED:   state_str = "Connected";   break;
-        case app::WIFI_CONN_FAILED:      state_str = "Failed";      break;
-        case app::WIFI_CONN_DISCONNECTED: state_str = "Disconnected"; break;
+        case app::wifi_conn_state::Idle:        state_str = "Idle";        break;
+        case app::wifi_conn_state::Scanning:    state_str = "Scanning";    break;
+        case app::wifi_conn_state::Connecting:  state_str = "Connecting";  break;
+        case app::wifi_conn_state::Connected:   state_str = "Connected";   break;
+        case app::wifi_conn_state::Failed:      state_str = "Failed";      break;
+        case app::wifi_conn_state::Disconnected: state_str = "Disconnected"; break;
     }
     char buf[96];
     if (st.ssid[0] == 0) {

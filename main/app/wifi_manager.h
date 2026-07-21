@@ -9,24 +9,23 @@ namespace app {
 
 class WifiManager;
 
-// Connection status surfaced for the Settings page. (1) current state of
-// the link (enum, below) and (2) the AP we're associated with (empty
-// when disconnected). `ip` is the last IP we got from IP_EVENT_STA_GOT_IP
-// or 0.0.0.0 if not connected yet. Caller passes a wifi_status_t* buffer.
-struct wifi_status {
-    int      state;       // matches enum wifi_conn_state below
-    char     ssid[33];    // 32 + NUL, matches wifi_config_t.ssid length
-    char     ip[16];      // "255.255.255.255" or "0.0.0.0"
-    int8_t   rssi;        // last seen RSSI (0 if unknown)
-    uint8_t  pad;         // align
+// Connection state enum — declared first so wifi_status can use it.
+enum class wifi_conn_state : int {
+    Idle       = 0,
+    Scanning   = 1,
+    Connecting = 2,
+    Connected  = 3,
+    Failed     = 4,
+    Disconnected = 5,
 };
-enum wifi_conn_state {
-    WIFI_CONN_IDLE       = 0,  // wifi up, not configured
-    WIFI_CONN_SCANNING   = 1,  // scan in progress
-    WIFI_CONN_CONNECTING  = 2,  // STA in the process of associating
-    WIFI_CONN_CONNECTED   = 3,  // IP acquired
-    WIFI_CONN_FAILED      = 4,  // last connect attempt failed
-    WIFI_CONN_DISCONNECTED= 5,  // explicit disconnect
+
+// Connection status surfaced for the Settings page.
+struct wifi_status {
+    wifi_conn_state state;
+    char     ssid[33];
+    char     ip[16];
+    int8_t   rssi;
+    uint8_t  pad;
 };
 
 // Singleton wrapper around the Wi-Fi subsystem. Owns the event loop, the
@@ -54,7 +53,7 @@ private:
 
     // ---- internal types ----
     struct WifiEvent {
-        int      kind;
+        wifi_conn_state kind;
         char     ssid[33];
         char     ip[16];
         int8_t   rssi;
@@ -77,7 +76,7 @@ private:
     void persist_credentials(const char *ssid, const char *password);
     void load_credentials(char *out_ssid, size_t ssid_sz,
                           char *out_pass, size_t pass_sz);
-    void post_event(int kind, const char *ssid, const char *ip, int8_t rssi);
+    void post_event(wifi_conn_state kind, const char *ssid, const char *ip, int8_t rssi);
     void set_status_ssid(const char *ssid);
     void do_connect_locked(const char *ssid, const char *pass);
 

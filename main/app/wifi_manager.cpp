@@ -64,7 +64,7 @@ void WifiManager::load_credentials(char *out_ssid, size_t ssid_sz,
     }
 }
 
-void WifiManager::post_event(int kind, const char *ssid, const char *ip, int8_t rssi)
+void WifiManager::post_event(wifi_conn_state kind, const char *ssid, const char *ip, int8_t rssi)
 {
     if (!evt_queue_) return;
     WifiEvent ev{};
@@ -92,24 +92,24 @@ void WifiManager::event_handler(void *arg, esp_event_base_t event_base,
     auto &self = instance();
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        self.status_.state = WIFI_CONN_CONNECTING;
+        self.status_.state = wifi_conn_state::Connecting;
         self.set_status_ssid(self.status_.ssid);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         wifi_event_sta_connected_t *event = static_cast<wifi_event_sta_connected_t *>(event_data);
         self.set_status_ssid((const char *)event->ssid);
-        self.status_.state = WIFI_CONN_CONNECTING;
+        self.status_.state = wifi_conn_state::Connecting;
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *event =
             static_cast<wifi_event_sta_disconnected_t *>(event_data);
         ESP_LOGW(TAG, "Disconnected from AP, reason=%d, rssi=%d",
                  event->reason, event->rssi);
-        self.status_.state = WIFI_CONN_FAILED;
+        self.status_.state = wifi_conn_state::Failed;
         strncpy(self.status_.ip, "0.0.0.0", sizeof(self.status_.ip));
-        self.post_event(WIFI_CONN_FAILED, nullptr, nullptr, 0);
+        self.post_event(wifi_conn_state::Failed, nullptr, nullptr, 0);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = static_cast<ip_event_got_ip_t *>(event_data);
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        self.status_.state = WIFI_CONN_CONNECTED;
+        self.status_.state = wifi_conn_state::Connected;
         snprintf(self.status_.ip, sizeof(self.status_.ip), IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(self.events_, BIT0);
 
@@ -129,7 +129,7 @@ void WifiManager::event_handler(void *arg, esp_event_base_t event_base,
         } else {
             ESP_LOGI(TAG, "SNTP already running; skipping re-init");
         }
-        self.post_event(WIFI_CONN_CONNECTED, self.status_.ssid, self.status_.ip, self.status_.rssi);
+        self.post_event(wifi_conn_state::Connected, self.status_.ssid, self.status_.ip, self.status_.rssi);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_SCAN_DONE) {
         uint16_t n = kMaxAps;
         if (esp_wifi_scan_get_ap_records(&n, self.scan_) == ESP_OK) {
@@ -142,10 +142,10 @@ void WifiManager::event_handler(void *arg, esp_event_base_t event_base,
         // v0.6.6 fix: SCAN_DONE must return state to IDLE so the UI
         // poll can detect the SCANNING->IDLE transition and rebuild the
         // AP list. Without this the state stays SCANNING forever.
-        if (self.status_.state == WIFI_CONN_SCANNING) {
-            self.status_.state = WIFI_CONN_IDLE;
+        if (self.status_.state == wifi_conn_state::Scanning) {
+            self.status_.state = wifi_conn_state::Idle;
         }
-        self.post_event(WIFI_CONN_IDLE, nullptr, nullptr, 0);  // re-arms UI refresh
+        self.post_event(wifi_conn_state::Idle, nullptr, nullptr, 0);  // re-arms UI refresh
     }
 }
 
@@ -172,7 +172,7 @@ void WifiManager::do_connect_locked(const char *ssid, const char *pass)
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_config(WIFI_IF_STA, &cfg));
     set_status_ssid(ssid);
-    status_.state = WIFI_CONN_CONNECTING;
+    status_.state = wifi_conn_state::Connecting;
     esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_connect();
     ESP_LOGI(TAG, "Connect requested: ssid=%s", ssid);
@@ -182,7 +182,7 @@ void WifiManager::do_connect_locked(const char *ssid, const char *pass)
         pdTRUE, pdFALSE, pdMS_TO_TICKS(12000));
 
     if (bits & BIT0) {
-        status_.state = WIFI_CONN_CONNECTED;
+        status_.state = wifi_conn_state::Connected;
         ESP_LOGI(TAG, "Connected to %s", ssid);
     } else {
         // v0.6.6 fix: do NOT call esp_wifi_disconnect() here. Doing so
@@ -190,7 +190,7 @@ void WifiManager::do_connect_locked(const char *ssid, const char *pass)
         // auth/assoc state machine and re-triggers the "state: run->init"
         // 10 ms DISASSOC race (reason=8). The next scan cmd path already
         // force-disconnects if needed.
-        status_.state = WIFI_CONN_FAILED;
+        status_.state = wifi_conn_state::Failed;
         ESP_LOGW(TAG, "Connect to %s failed/timed out", ssid);
     }
 
@@ -245,7 +245,7 @@ void WifiManager::task_loop()
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
     esp_wifi_set_ps(WIFI_PS_NONE);
 
-    status_.state = WIFI_CONN_IDLE;
+    status_.state = wifi_conn_state::Idle;
     strncpy(status_.ssid, "", sizeof(status_.ssid));
     strncpy(status_.ip, "0.0.0.0", sizeof(status_.ip));
     status_.rssi = 0;
@@ -273,21 +273,21 @@ void WifiManager::task_loop()
                 // mid-retry even after event_handler marks FAILED.
                 // esp_wifi_disconnect() guarantees a clean IDLE state so
                 // the scan call doesn't bounce back as ESP_ERR_WIFI_STATE.
-                if (status_.state == WIFI_CONN_CONNECTING ||
-                    status_.state == WIFI_CONN_FAILED) {
+                if (status_.state == wifi_conn_state::Connecting ||
+                    status_.state == wifi_conn_state::Failed) {
                     ESP_LOGW(TAG, "Force-disconnecting before scan");
                     esp_wifi_disconnect();
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 scan_inflight_.store(true);
-                status_.state = WIFI_CONN_SCANNING;
+                status_.state = wifi_conn_state::Scanning;
                 wifi_scan_config_t sc = {};
                 sc.show_hidden = false;
                 sc.scan_type   = WIFI_SCAN_TYPE_ACTIVE;
                 esp_err_t err = esp_wifi_scan_start(&sc, false);
                 if (err != ESP_OK) {
                     scan_inflight_.store(false);
-                    status_.state = WIFI_CONN_IDLE;
+                    status_.state = wifi_conn_state::Idle;
                     ESP_LOGE(TAG, "esp_wifi_scan_start: %s",
                              esp_err_to_name(err));
                 }
@@ -297,9 +297,9 @@ void WifiManager::task_loop()
                 do_connect_locked(cmd.ssid, cmd.pass);
             } else if (cmd.kind == 2) {
                 esp_wifi_disconnect();
-                status_.state = WIFI_CONN_DISCONNECTED;
+                status_.state = wifi_conn_state::Disconnected;
                 strncpy(status_.ip, "0.0.0.0", sizeof(status_.ip));
-                post_event(WIFI_CONN_DISCONNECTED, nullptr, nullptr, 0);
+                post_event(wifi_conn_state::Disconnected, nullptr, nullptr, 0);
             }
         }
     }
