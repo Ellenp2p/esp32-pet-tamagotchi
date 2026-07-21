@@ -475,11 +475,11 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
     // Tombstone disables all games.
     bool tomb = (stg == pet::LifeStage::Tombstone);
     make_card(0, "Whack",    0x1976D2, !tomb,
-              pet::game_whack::build,    pet::game_whack::destroy);
+              WhackGame::build,    WhackGame::destroy);
     make_card(1, "Sequence", 0x388E3C, !tomb && (int)stg >= (int)pet::LifeStage::Child,
-              pet::game_sequence::build, pet::game_sequence::destroy);
+              SequenceGame::build, SequenceGame::destroy);
     make_card(2, "Gacha",    0xC62828, !tomb && (int)stg >= (int)pet::LifeStage::Teen,
-              pet::game_gacha::build,    pet::game_gacha::destroy);
+              GachaGame::build,    GachaGame::destroy);
 
     gctx->back_btn = lv_button_create(root);
     lv_obj_set_size(gctx->back_btn, 56, 22);
@@ -1049,15 +1049,14 @@ static void build_ui()
     lv_obj_t *screen = lv_scr_act();
     lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
 
-    pet::pages::register_page(pet::pages::Page::Status,   build_page_status,   destroy_page_status);
-    pet::pages::register_page(pet::pages::Page::Games,    build_page_games,    destroy_page_games);
-    pet::pages::register_page(pet::pages::Page::Shop,     build_page_shop,     nullptr);
-    pet::pages::register_page(pet::pages::Page::Settings, build_page_settings, destroy_page_settings);
-    // v0.6.7: AI Usage tab — no-op when no keys are configured.
+    PetPages::instance().register_page(PetPages::Page::Status,   build_page_status,   destroy_page_status);
+    PetPages::instance().register_page(PetPages::Page::Games,    build_page_games,    destroy_page_games);
+    PetPages::instance().register_page(PetPages::Page::Shop,     build_page_shop,     nullptr);
+    PetPages::instance().register_page(PetPages::Page::Settings, build_page_settings, destroy_page_settings);
     pet::ai_usage::AiUsagePage::instance().register_handlers();
 
-    pet::pages::build_tabs(screen);
-    pet::pages::switch_page(pet::pages::Page::Status);
+    PetPages::instance().build_tabs(screen);
+    PetPages::instance().switch_page(PetPages::Page::Status);
 
     lv_timer_create(on_update_timer, 500, nullptr);
 }
@@ -1081,14 +1080,14 @@ esp_err_t start_ui()
     }
 
     Pet::instance().init();
-    pet::save::init();
-    pet::save::load(Pet::instance());
+    PetSave::instance().init();
+    PetSave::instance().load(Pet::instance());
 
     // v0.6: check daily streak once the system time is stable. If NTP
     // hasn't synced yet (no WiFi, or first boot), today_epoch_day() returns
-    // 0 and meta::record_open_day_and_reward() short-circuits.
-    int streak = pet::meta::record_open_day_and_reward(
-        pet::meta::today_epoch_day());
+    // 0 and PetMeta::instance().record_open_day_and_reward() short-circuits.
+    int streak = PetMeta::instance().record_open_day_and_reward(
+        PetMeta::instance().today_epoch_day());
     if (streak >= 1) {
         ESP_LOGI(TAG, "Daily streak active: %d days, +%d coins",
                  streak, streak * 10);

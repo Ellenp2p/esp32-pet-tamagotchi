@@ -29,15 +29,15 @@ void PetMainTask::task_loop()
     bsp::QMI8658_Data imu_data;
     int notify_counter = 0;
     int save_counter = 0;
-    pet::idle_events::init();
+    PetIdleEvents::instance().init();
 
     while (true) {
         Pet::instance().update();
-        pet::idle_events::tick(Pet::instance().get_state().age_ticks);
+        PetIdleEvents::instance().tick(Pet::instance().get_state().age_ticks);
 
         if (Pet::instance().is_dirty()) {
             if (++save_counter >= 50) {
-                pet::save::save_if_dirty(Pet::instance(), false);
+                PetSave::instance().save_if_dirty(Pet::instance(), false);
                 save_counter = 0;
             }
         } else {

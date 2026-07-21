@@ -2,21 +2,16 @@
 #include "pet_state.h"
 
 #include "nvs_flash.h"
-#include "nvs.h"
 #include "esp_log.h"
 #include <cstring>
 
 namespace pet {
-namespace save {
 
 static const char *TAG = "pet_save";
 static const char *kNamespace = "pet_save";
-static const char *kKeyV1     = "state";     // 29-byte Snapshot (v0.5.x)
-static const char *kKeyV2     = "state_v2";   // 41-byte Snapshot (v0.6+)
+static const char *kKeyV1     = "state";
+static const char *kKeyV2     = "state_v2";
 
-// v0.6 wire format. Layout is intentionally append-only — new fields are
-// added at the end so the first 29 bytes are bit-compatible with v0.5.x
-// snapshots and v1 reads can copy old bytes verbatim.
 struct Snapshot {
     int32_t fullness;
     int32_t happiness;
@@ -27,59 +22,54 @@ struct Snapshot {
     int32_t age_ticks;
     uint8_t sleeping;
 
-    // v0.6 additions (12 bytes):
-    uint8_t  stage;              // LifeStage cast to int
-    uint8_t  _pad0;              // explicit padding to keep 4-byte align
+    uint8_t  stage;
+    uint8_t  _pad0;
     uint8_t  _pad1;
     uint8_t  _pad2;
-    int32_t   stage_entered_tick;  // age_ticks at last stage change
-    int32_t   last_open_day;       // epoch days, 0 = never
+    int32_t  stage_entered_tick;
+    int32_t  last_open_day;
 } __attribute__((packed));
 
 static_assert(sizeof(Snapshot) == 41, "Snapshot size changed; update kKeyV2 consumers");
 
-static nvs_handle_t s_handle = 0;
-static bool s_open = false;
-
-esp_err_t init()
+PetSave &PetSave::instance() noexcept
 {
-    if (s_open) return ESP_OK;
-    esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &s_handle);
+    static PetSave s;
+    return s;
+}
+
+esp_err_t PetSave::init() noexcept
+{
+    if (open_) return ESP_OK;
+    esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &handle_);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_open failed: %s", esp_err_to_name(err));
         return err;
     }
-    s_open = true;
+    open_ = true;
     ESP_LOGI(TAG, "NVS namespace '%s' ready", kNamespace);
     return ESP_OK;
 }
 
-// Apply a v1 (29-byte) snapshot to Pet. Used when we find a legacy
-// kKeyV1 entry; the v0.6 fields default to Egg / stage_entered_tick=age_ticks
-// / last_open_day=0. The streak counter is recomputed on the next
-// record_open_day() call.
 static void apply_v1(Pet &pet, const Snapshot &s)
 {
     pet.apply_snapshot(
         s.fullness, s.happiness, s.energy, s.health,
         s.coins, s.level, s.age_ticks, s.sleeping != 0,
-        /*stage=*/ 0,            // Egg
-        /*stage_entered_tick=*/ s.age_ticks,
-        /*last_open_day=*/ 0);
+        0, s.age_ticks, 0);
 }
 
-esp_err_t load(Pet &pet)
+esp_err_t PetSave::load(Pet &pet) noexcept
 {
-    if (!s_open) {
+    if (!open_) {
         esp_err_t err = init();
         if (err != ESP_OK) return err;
     }
 
-    // Try v2 first.
     {
         Snapshot snap;
         size_t size = sizeof(snap);
-        esp_err_t err = nvs_get_blob(s_handle, kKeyV2, &snap, &size);
+        esp_err_t err = nvs_get_blob(handle_, kKeyV2, &snap, &size);
         if (err == ESP_OK) {
             if (size == sizeof(snap)) {
                 pet.apply_snapshot(
@@ -98,20 +88,15 @@ esp_err_t load(Pet &pet)
             ESP_LOGE(TAG, "nvs_get_blob(v2) failed: %s", esp_err_to_name(err));
             return err;
         }
-        // fall through to v1 attempt
     }
 
-    // Try v1 (29 bytes) — backwards-compat with v0.5.x firmware.
     {
-        // We use a stack buffer of exactly 29 bytes. To avoid making a
-        // second Snapshot type, reinterpret the first 29 bytes of a
-        // zero-initialised Snapshot.
         Snapshot snap{};
-        size_t size = 29;  // explicit v1 size
-        esp_err_t err = nvs_get_blob(s_handle, kKeyV1, &snap, &size);
+        size_t size = 29;
+        esp_err_t err = nvs_get_blob(handle_, kKeyV1, &snap, &size);
         if (err == ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGI(TAG, "No saved snapshot; using defaults");
-            return ESP_OK;  // first boot is fine
+            return ESP_OK;
         }
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "nvs_get_blob(v1) failed: %s", esp_err_to_name(err));
@@ -125,16 +110,13 @@ esp_err_t load(Pet &pet)
         ESP_LOGI(TAG, "Loaded v1 snapshot (v0.5.x); migrated: F=%d Ha=%d E=%d He=%d coins=%d Lv%d age=%ds sleep=%d",
                   snap.fullness, snap.happiness, snap.energy, snap.health,
                   snap.coins, snap.level, snap.age_ticks, snap.sleeping);
-        // Immediately upgrade to v2 in the background. We don't mark dirty
-        // here because the data is freshly restored, but we DO save once
-        // to lay down the v2 key.
-        return save_if_dirty(pet, /*force=*/true);
+        return save_if_dirty(pet, true);
     }
 }
 
-esp_err_t save_if_dirty(Pet &pet, bool force)
+esp_err_t PetSave::save_if_dirty(Pet &pet, bool force) noexcept
 {
-    if (!s_open) {
+    if (!open_) {
         esp_err_t err = init();
         if (err != ESP_OK) return err;
     }
@@ -158,12 +140,12 @@ esp_err_t save_if_dirty(Pet &pet, bool force)
         .last_open_day    = pet.last_open_day(),
     };
 
-    esp_err_t err = nvs_set_blob(s_handle, kKeyV2, &snap, sizeof(snap));
+    esp_err_t err = nvs_set_blob(handle_, kKeyV2, &snap, sizeof(snap));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_set_blob(v2) failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = nvs_commit(s_handle);
+    err = nvs_commit(handle_);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_commit failed: %s", esp_err_to_name(err));
         return err;
@@ -173,17 +155,15 @@ esp_err_t save_if_dirty(Pet &pet, bool force)
     return ESP_OK;
 }
 
-esp_err_t clear()
+esp_err_t PetSave::clear() noexcept
 {
-    if (!s_open) {
+    if (!open_) {
         esp_err_t err = init();
         if (err != ESP_OK) return err;
     }
-    // Erase both v1 and v2 keys. Ignore NOT_FOUND — keys may not exist.
-    nvs_erase_key(s_handle, kKeyV1);
-    nvs_erase_key(s_handle, kKeyV2);
-    return nvs_commit(s_handle);
+    nvs_erase_key(handle_, kKeyV1);
+    nvs_erase_key(handle_, kKeyV2);
+    return nvs_commit(handle_);
 }
 
-}  // namespace save
-}  // namespace pet
+} // namespace pet

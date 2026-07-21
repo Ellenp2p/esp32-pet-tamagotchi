@@ -770,8 +770,8 @@ void destroy_page(lv_obj_t *root)
 void register_page_handlers()
 {
     if (!AiUsageWorker::instance().enabled()) return;
-    pet::pages::set_ai_usage_enabled(true);
-    pet::pages::register_page(pet::pages::Page::AIUsage,
+    PetPages::instance().set_ai_usage_enabled(true);
+    PetPages::instance().register_page(PetPages::Page::AIUsage,
                               build_page, destroy_page);
     ESP_LOGI(TAG, "AIUsage page registered");
 }

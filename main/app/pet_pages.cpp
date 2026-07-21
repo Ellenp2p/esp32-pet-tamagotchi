@@ -2,68 +2,54 @@
 #include "esp_log.h"
 
 namespace pet {
-namespace pages {
 
 static const char *TAG = "pet_pages";
-
-static const char *kTabLabels[(int)Page::Count] = {"Status", "Games", "Shop", "Settings", "AI"};
-
-struct PageHandlers {
-    BuildFn build = nullptr;
-    DestroyFn destroy = nullptr;
-    lv_obj_t *root = nullptr;  // current page widget tree (cleared on switch)
-};
-
-static PageHandlers s_handlers[(int)Page::Count];
-static Page s_current = Page::Status;
-static lv_obj_t *s_tabs[(int)Page::Count] = {nullptr};
-static lv_obj_t *s_content = nullptr;
-
-// v0.6.7: runtime flag toggled by AiUsagePage::register_handlers.
-// When false, the AIUsage tab is hidden (page_count() returns 4) and its
-// build/destroy handler slot stays unused.
-static bool s_ai_enabled = false;
-
-bool ai_usage_enabled() { return s_ai_enabled; }
-void set_ai_usage_enabled(bool on) { s_ai_enabled = on; }
-int  page_count() { return s_ai_enabled ? 5 : 4; }
-
-void register_page(Page page, BuildFn build, DestroyFn destroy)
-{
-    int idx = (int)page;
-    if (idx < 0 || idx >= (int)Page::Count) return;
-    s_handlers[idx].build = build;
-    s_handlers[idx].destroy = destroy;
-}
+static const char *kTabLabels[] = {"Status", "Games", "Shop", "Settings", "AI"};
 
 static void style_active_tab(lv_obj_t *tab, bool active)
 {
     if (active) {
-        lv_obj_set_style_bg_color(tab, lv_color_hex(0x1976D2), 0);  // blue
+        lv_obj_set_style_bg_color(tab, lv_color_hex(0x1976D2), 0);
     } else {
-        lv_obj_set_style_bg_color(tab, lv_color_hex(0x37474F), 0);  // dark gray
+        lv_obj_set_style_bg_color(tab, lv_color_hex(0x37474F), 0);
     }
 }
 
-static void tab_event_cb(lv_event_t *e)
+PetPages &PetPages::instance() noexcept
 {
-    Page target = (Page)(intptr_t)lv_event_get_user_data(e);
-    if (target == s_current) return;
-    switch_page(target);
+    static PetPages s;
+    return s;
 }
 
-void build_tabs(lv_obj_t *screen)
-{
-    // Content area sits above the tab bar.
-    s_content = lv_obj_create(screen);
-    lv_obj_set_size(s_content, 320, 208);
-    lv_obj_set_pos(s_content, 0, 0);
-    lv_obj_set_style_bg_color(s_content, lv_color_black(), 0);
-    lv_obj_set_style_border_width(s_content, 0, 0);
-    lv_obj_set_style_pad_all(s_content, 0, 0);
+bool PetPages::ai_usage_enabled() noexcept { return ai_enabled_; }
+void PetPages::set_ai_usage_enabled(bool on) noexcept { ai_enabled_ = on; }
+int  PetPages::page_count() noexcept { return ai_enabled_ ? 5 : 4; }
+PetPages::Page PetPages::current_page() noexcept { return current_; }
 
-    // Tab bar at the bottom: page_count() buttons sized to fit 320 px.
-    // 4 tabs -> 80 px each, 5 tabs -> 64 px each.
+void PetPages::register_page(Page page, BuildFn build, DestroyFn destroy) noexcept
+{
+    int idx = (int)page;
+    if (idx < 0 || idx >= (int)Page::Count) return;
+    handlers_[idx].build = build;
+    handlers_[idx].destroy = destroy;
+}
+
+void PetPages::tab_event_cb(lv_event_t *e) noexcept
+{
+    Page target = (Page)(intptr_t)lv_event_get_user_data(e);
+    if (target == instance().current_) return;
+    instance().switch_page(target);
+}
+
+void PetPages::build_tabs(lv_obj_t *screen) noexcept
+{
+    content_ = lv_obj_create(screen);
+    lv_obj_set_size(content_, 320, 208);
+    lv_obj_set_pos(content_, 0, 0);
+    lv_obj_set_style_bg_color(content_, lv_color_black(), 0);
+    lv_obj_set_style_border_width(content_, 0, 0);
+    lv_obj_set_style_pad_all(content_, 0, 0);
+
     int n = page_count();
     int btn_w = 320 / n;
     for (int i = 0; i < n; i++) {
@@ -71,54 +57,47 @@ void build_tabs(lv_obj_t *screen)
         lv_obj_set_size(btn, btn_w, 32);
         lv_obj_set_pos(btn, i * btn_w, 208);
         lv_obj_add_event_cb(btn, tab_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-        style_active_tab(btn, i == (int)s_current);
+        style_active_tab(btn, i == (int)current_);
 
         lv_obj_t *label = lv_label_create(btn);
         lv_label_set_text(label, kTabLabels[i]);
         lv_obj_center(label);
-        s_tabs[i] = btn;
+        tabs_[i] = btn;
     }
 }
 
-static void highlight_tab(Page page)
+void PetPages::highlight_tab(Page page) noexcept
 {
     int n = page_count();
     for (int i = 0; i < n; i++) {
-        style_active_tab(s_tabs[i], i == (int)page);
+        style_active_tab(tabs_[i], i == (int)page);
     }
 }
 
-void switch_page(Page page)
+void PetPages::switch_page(Page page) noexcept
 {
     int idx = (int)page;
     if (idx < 0 || idx >= (int)Page::Count) return;
-    if (!s_handlers[idx].build) {
+    if (!handlers_[idx].build) {
         ESP_LOGW(TAG, "Page %d has no build handler", idx);
         return;
     }
 
-    // Tear down current page. Even if destroy() is a no-op stub, we must
-    // still call lv_obj_del() so the LV_EVENT_DELETE handler frees the
-    // GamesCtx and any timers the active game registered.
-    if (s_handlers[(int)s_current].root) {
-        lv_obj_t *root = s_handlers[(int)s_current].root;
-        if (s_handlers[(int)s_current].destroy) {
-            s_handlers[(int)s_current].destroy(root);
+    if (handlers_[(int)current_].root) {
+        lv_obj_t *root = handlers_[(int)current_].root;
+        if (handlers_[(int)current_].destroy) {
+            handlers_[(int)current_].destroy(root);
         }
         if (lv_obj_is_valid(root)) {
             lv_obj_del(root);
         }
-        s_handlers[(int)s_current].root = nullptr;
+        handlers_[(int)current_].root = nullptr;
     }
 
-    // Build new page as child of content container.
-    s_current = page;
-    s_handlers[idx].root = s_handlers[idx].build(s_content);
+    current_ = page;
+    handlers_[idx].root = handlers_[idx].build(content_);
     highlight_tab(page);
     ESP_LOGI(TAG, "Switched to page %d", idx);
 }
 
-Page current_page() { return s_current; }
-
-}  // namespace pages
-}  // namespace pet
+} // namespace pet
