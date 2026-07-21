@@ -7,7 +7,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_sntp.h"
-#include "util/NvsStorage.h"
+#include "util/NvsHandle.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -33,8 +33,12 @@ WifiManager &WifiManager::instance() noexcept
 // ---- helpers -----------------------------------------------------------------
 void WifiManager::persist_credentials(const char *ssid, const char *password)
 {
-    NvsStorage<std::string>(kNsWifi, kKeySsid).save(ssid ? std::string(ssid) : "");
-    NvsStorage<std::string>(kNsWifi, kKeyPassword).save(password ? std::string(password) : "");
+    {
+        NvsHandle h(kNsWifi);
+        h.set_str(kKeySsid, ssid ? ssid : "");
+        h.set_str(kKeyPassword, password ? password : "");
+        h.commit();
+    }
     nvs_loaded_ = true;
     strncpy(nvs_ssid_, ssid ? ssid : "", sizeof(nvs_ssid_) - 1);
     nvs_ssid_[sizeof(nvs_ssid_) - 1] = 0;
@@ -45,19 +49,19 @@ void WifiManager::persist_credentials(const char *ssid, const char *password)
 void WifiManager::load_credentials(char *out_ssid, size_t ssid_sz,
                                    char *out_pass, size_t pass_sz)
 {
-    std::string ssid, pass;
-    if (!NvsStorage<std::string>(kNsWifi, kKeySsid).load(&ssid)) {
+    NvsHandle h(kNsWifi, NVS_READONLY);
+    size_t sz = ssid_sz;
+    if (h.get_str(kKeySsid, out_ssid, &sz) != ESP_OK) {
         strncpy(out_ssid, CONFIG_PET_WIFI_SSID, ssid_sz - 1);
         out_ssid[ssid_sz - 1] = 0;
         strncpy(out_pass, CONFIG_PET_WIFI_PASSWORD, pass_sz - 1);
         out_pass[pass_sz - 1] = 0;
         return;
     }
-    NvsStorage<std::string>(kNsWifi, kKeyPassword).load(&pass);
-    strncpy(out_ssid, ssid.c_str(), ssid_sz - 1);
-    out_ssid[ssid_sz - 1] = 0;
-    strncpy(out_pass, pass.c_str(), pass_sz - 1);
-    out_pass[pass_sz - 1] = 0;
+    sz = pass_sz;
+    if (h.get_str(kKeyPassword, out_pass, &sz) != ESP_OK) {
+        out_pass[0] = 0;
+    }
 }
 
 void WifiManager::post_event(int kind, const char *ssid, const char *ip, int8_t rssi)
@@ -366,8 +370,12 @@ esp_err_t WifiManager::disconnect()
 
 esp_err_t WifiManager::forget()
 {
-    bool ok = NvsStorage<std::string>(kNsWifi, kKeySsid).erase();
-    ok = NvsStorage<std::string>(kNsWifi, kKeyPassword).erase() && ok;
+    NvsHandle h(kNsWifi);
+    esp_err_t e1 = h.erase(kKeySsid);
+    esp_err_t e2 = h.erase(kKeyPassword);
+    h.commit();
+    bool ok = (e1 == ESP_OK || e1 == ESP_ERR_NVS_NOT_FOUND)
+           && (e2 == ESP_OK || e2 == ESP_ERR_NVS_NOT_FOUND);
     nvs_loaded_ = false;
     nvs_ssid_[0] = 0;
     nvs_password_[0] = 0;

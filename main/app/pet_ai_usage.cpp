@@ -9,7 +9,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "util/NvsStorage.h"
+#include "util/NvsHandle.h"
 
 #include <cstring>
 #include <cstdlib>
@@ -53,11 +53,13 @@ bool AiUsageWorker::enabled() noexcept
     bool kc_minimax = has_key(CONFIG_PET_AI_USAGE_MINIMAX_KEY);
     // NVS escape hatch (filled at runtime, e.g. by an OTA script).
     if (!kc_kimi || !kc_minimax) {
-        std::string v;
-        if (NvsStorage<std::string>(kNsSecrets, kKeyKimi).load(&v))
-            strncpy(kimi_key_, v.c_str(), sizeof(kimi_key_) - 1);
-        if (NvsStorage<std::string>(kNsSecrets, kKeyMinimax).load(&v))
-            strncpy(minimax_key_, v.c_str(), sizeof(minimax_key_) - 1);
+        NvsHandle h(kNsSecrets, NVS_READONLY);
+        size_t sz = sizeof(kimi_key_);
+        if (h.get_str(kKeyKimi, kimi_key_, &sz) != ESP_OK)
+            kimi_key_[0] = 0;
+        sz = sizeof(minimax_key_);
+        if (h.get_str(kKeyMinimax, minimax_key_, &sz) != ESP_OK)
+            minimax_key_[0] = 0;
     }
     bool nv_kimi    = has_key(kimi_key_);
     bool nv_minimax = has_key(minimax_key_);

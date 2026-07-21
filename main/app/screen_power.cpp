@@ -6,7 +6,7 @@
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "util/NvsStorage.h"
+#include "util/NvsHandle.h"
 
 namespace pet {
 
@@ -40,8 +40,11 @@ constexpr int kTickMs    = 500;
 void ScreenPower::set_timeout(ScreenTimeout t)
 {
     timeout_ = t;
-    NvsStorage<uint8_t>(kNsPower, kKeyTimeout)
-        .save(kTimeoutToByte[(uint8_t)t]);
+    {
+        NvsHandle h(kNsPower);
+        h.set_u8(kKeyTimeout, kTimeoutToByte[(uint8_t)t]);
+        h.commit();
+    }
     ESP_LOGI(TAG, "timeout -> %s",
              t == ScreenTimeout::Off  ? "Off" :
              t == ScreenTimeout::Min2 ? "2 min" : "5 min");
@@ -132,8 +135,9 @@ void ScreenPower::init()
 
     // Read persisted timeout. Defaults to Min2 if unset.
     {
+        NvsHandle h(kNsPower, NVS_READONLY);
         uint8_t v = 0xFF;
-        if (NvsStorage<uint8_t>(kNsPower, kKeyTimeout).load(&v) && v < 3) {
+        if (h.get_u8(kKeyTimeout, &v) == ESP_OK && v < 3) {
             timeout_ = (ScreenTimeout)v;
         }
     }
