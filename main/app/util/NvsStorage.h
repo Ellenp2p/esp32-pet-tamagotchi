@@ -77,8 +77,8 @@ public:
     bool erase() noexcept {
         nvs_handle_t h;
         if (nvs_open(ns_, NVS_READWRITE, &h) != ESP_OK) return false;
-        bool ok = nvs_erase_key(h, key_) == ESP_OK
-                  || nvs_erase_key(h, key_) == ESP_ERR_NVS_NOT_FOUND;
+        esp_err_t e = nvs_erase_key(h, key_);
+        bool ok = e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;
         if (ok) ok = nvs_commit(h) == ESP_OK;
         nvs_close(h);
         return ok;

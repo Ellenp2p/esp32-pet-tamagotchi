@@ -109,6 +109,12 @@ void WifiManager::event_handler(void *arg, esp_event_base_t event_base,
         snprintf(self.status_.ip, sizeof(self.status_.ip), IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(self.events_, BIT0);
 
+        // v0.6.6 fix: SNTP can only be init'd once. Re-entering the
+        // event after a disconnect/reconnect would call
+        // esp_sntp_setoperatingmode() while the client is still running
+        // and trip an lwip assertion that abort()s the entire app.
+        // Skip the init path on subsequent GOT_IP events — the server
+        // name + operatingmode already survive in the LWIP SNTP module.
         static bool s_sntp_inited = false;
         if (!s_sntp_inited) {
             esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
@@ -129,10 +135,13 @@ void WifiManager::event_handler(void *arg, esp_event_base_t event_base,
         }
         self.scan_inflight_.store(false);
         ESP_LOGI(TAG, "Scan done, %d APs", self.scan_count_);
+        // v0.6.6 fix: SCAN_DONE must return state to IDLE so the UI
+        // poll can detect the SCANNING->IDLE transition and rebuild the
+        // AP list. Without this the state stays SCANNING forever.
         if (self.status_.state == WIFI_CONN_SCANNING) {
             self.status_.state = WIFI_CONN_IDLE;
         }
-        self.post_event(WIFI_CONN_IDLE, nullptr, nullptr, 0);
+        self.post_event(WIFI_CONN_IDLE, nullptr, nullptr, 0);  // re-arms UI refresh
     }
 }
 
@@ -142,11 +151,19 @@ void WifiManager::do_connect_locked(const char *ssid, const char *pass)
     wifi_config_t cfg = {};
     strncpy(reinterpret_cast<char *>(cfg.sta.ssid), ssid, sizeof(cfg.sta.ssid) - 1);
     strncpy(reinterpret_cast<char *>(cfg.sta.password), pass, sizeof(cfg.sta.password) - 1);
+    // PMF required=false: the AP on this user's network doesn't advertise
+    // PMF capability (NEWCJIA-8925), and the driver rejects the profile
+    // outright if required=true. The pm stop / state run->init disconnect
+    // bug is independent of PMF and is addressed by WIFI_PS_NONE below.
     cfg.sta.threshold.authmode = WIFI_AUTH_WPA_WPA2_PSK;
     cfg.sta.pmf_cfg.capable    = true;
     cfg.sta.pmf_cfg.required   = false;
     cfg.sta.scan_method        = WIFI_ALL_CHANNEL_SCAN;
 
+    // v0.6.6 fix: explicitly disconnect before set_config+connect so the
+    // driver's internal state machine resets. Without this, a wrong
+    // password that left the driver mid-retry causes subsequent scan
+    // calls to be silently dropped (busy).
     esp_wifi_disconnect();
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_config(WIFI_IF_STA, &cfg));
@@ -164,6 +181,11 @@ void WifiManager::do_connect_locked(const char *ssid, const char *pass)
         status_.state = WIFI_CONN_CONNECTED;
         ESP_LOGI(TAG, "Connected to %s", ssid);
     } else {
+        // v0.6.6 fix: do NOT call esp_wifi_disconnect() here. Doing so
+        // after a successful connect forces the driver back into the
+        // auth/assoc state machine and re-triggers the "state: run->init"
+        // 10 ms DISASSOC race (reason=8). The next scan cmd path already
+        // force-disconnects if needed.
         status_.state = WIFI_CONN_FAILED;
         ESP_LOGW(TAG, "Connect to %s failed/timed out", ssid);
     }
@@ -191,9 +213,15 @@ void WifiManager::task_loop()
                                         &event_handler, nullptr, &inst_any);
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                         &event_handler, nullptr, &inst_got_ip);
+    // SCAN_DONE is covered by the ESP_EVENT_ANY_ID registration above —
+    // do not register it separately or event_handler() fires twice and
+    // the second call to esp_wifi_scan_get_ap_records() returns 0.
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mode(WIFI_MODE_STA));
 
+    // v0.6.6 fix: STA-only mode requires an explicit country before
+    // esp_wifi_scan_start() will broadcast probe requests. Without this
+    // the scan call returns ESP_OK but never produces a SCAN_DONE event.
     wifi_country_t cc = {};
     cc.cc[0] = 'C'; cc.cc[1] = 'N'; cc.cc[2] = 0;
     cc.schan = 1;
@@ -203,6 +231,12 @@ void WifiManager::task_loop()
     ESP_LOGI(TAG, "esp_wifi_set_country(CN) returned %s",
              esp_err_to_name(cc_err));
 
+    // v0.6.6 fix: ESP-IDF v6.0.2 + ESP32-S3 rev 0.2 has a known issue
+    // where the driver kicks the AP into "pm stop" ~10 ms after DHCP
+    // completes and then DISASSOCs the STA with reason=8. The workaround
+    // is to keep power save disabled — esp_wifi_set_ps(WIFI_PS_NONE)
+    // must be reasserted after every reconnect, since the driver silently
+    // flips it back to MIN_MODEM during connect.
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
     esp_wifi_set_ps(WIFI_PS_NONE);
@@ -231,6 +265,10 @@ void WifiManager::task_loop()
                     ESP_LOGW(TAG, "Scan already in flight; ignoring");
                     continue;
                 }
+                // v0.6.6 fix: a bad-password connect can leave the driver
+                // mid-retry even after event_handler marks FAILED.
+                // esp_wifi_disconnect() guarantees a clean IDLE state so
+                // the scan call doesn't bounce back as ESP_ERR_WIFI_STATE.
                 if (status_.state == WIFI_CONN_CONNECTING ||
                     status_.state == WIFI_CONN_FAILED) {
                     ESP_LOGW(TAG, "Force-disconnecting before scan");
@@ -328,12 +366,12 @@ esp_err_t WifiManager::disconnect()
 
 esp_err_t WifiManager::forget()
 {
-    NvsStorage<std::string>(kNsWifi, kKeySsid).erase();
-    NvsStorage<std::string>(kNsWifi, kKeyPassword).erase();
+    bool ok = NvsStorage<std::string>(kNsWifi, kKeySsid).erase();
+    ok = NvsStorage<std::string>(kNsWifi, kKeyPassword).erase() && ok;
     nvs_loaded_ = false;
     nvs_ssid_[0] = 0;
     nvs_password_[0] = 0;
-    return ESP_OK;
+    return ok ? ESP_OK : ESP_ERR_NVS_NOT_FOUND;
 }
 
 bool WifiManager::get_saved_credentials(char *out_ssid, size_t ssid_sz,
