@@ -9,8 +9,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
-#include "nvs.h"
+#include "util/NvsStorage.h"
 
 #include <cstring>
 #include <cstdlib>
@@ -45,15 +44,6 @@ static const char *kNsSecrets  = "pet_ai_secrets";
 static const char *kKeyKimi    = "kimi_key";
 static const char *kKeyMinimax = "minimax_key";
 
-static void read_nvs_key(const char *ns, const char *key, char *out, size_t out_sz)
-{
-    nvs_handle_t h;
-    if (nvs_open(ns, NVS_READONLY, &h) != ESP_OK) { out[0] = 0; return; }
-    size_t sz = out_sz;
-    if (nvs_get_str(h, key, out, &sz) != ESP_OK) out[0] = 0;
-    nvs_close(h);
-}
-
 static bool has_key(const char *k) { return k && k[0] != 0; }
 
 bool AiUsageWorker::enabled() noexcept
@@ -63,8 +53,11 @@ bool AiUsageWorker::enabled() noexcept
     bool kc_minimax = has_key(CONFIG_PET_AI_USAGE_MINIMAX_KEY);
     // NVS escape hatch (filled at runtime, e.g. by an OTA script).
     if (!kc_kimi || !kc_minimax) {
-        read_nvs_key(kNsSecrets, kKeyKimi,    kimi_key_,    sizeof(kimi_key_));
-        read_nvs_key(kNsSecrets, kKeyMinimax, minimax_key_, sizeof(minimax_key_));
+        std::string v;
+        if (NvsStorage<std::string>(kNsSecrets, kKeyKimi).load(&v))
+            strncpy(kimi_key_, v.c_str(), sizeof(kimi_key_) - 1);
+        if (NvsStorage<std::string>(kNsSecrets, kKeyMinimax).load(&v))
+            strncpy(minimax_key_, v.c_str(), sizeof(minimax_key_) - 1);
     }
     bool nv_kimi    = has_key(kimi_key_);
     bool nv_minimax = has_key(minimax_key_);

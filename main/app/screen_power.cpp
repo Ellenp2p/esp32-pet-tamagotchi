@@ -6,8 +6,7 @@
 #include "esp_lvgl_port.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "nvs_flash.h"
-#include "nvs.h"
+#include "util/NvsStorage.h"
 
 namespace pet {
 
@@ -41,12 +40,8 @@ constexpr int kTickMs    = 500;
 void ScreenPower::set_timeout(ScreenTimeout t)
 {
     timeout_ = t;
-    nvs_handle_t h;
-    if (nvs_open(kNsPower, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, kKeyTimeout, kTimeoutToByte[(uint8_t)t]);
-        nvs_commit(h);
-        nvs_close(h);
-    }
+    NvsStorage<uint8_t>(kNsPower, kKeyTimeout)
+        .save(kTimeoutToByte[(uint8_t)t]);
     ESP_LOGI(TAG, "timeout -> %s",
              t == ScreenTimeout::Off  ? "Off" :
              t == ScreenTimeout::Min2 ? "2 min" : "5 min");
@@ -136,13 +131,11 @@ void ScreenPower::init()
     if (task_) return;  // idempotent
 
     // Read persisted timeout. Defaults to Min2 if unset.
-    nvs_handle_t h;
-    if (nvs_open(kNsPower, NVS_READONLY, &h) == ESP_OK) {
+    {
         uint8_t v = 0xFF;
-        if (nvs_get_u8(h, kKeyTimeout, &v) == ESP_OK && v < 3) {
+        if (NvsStorage<uint8_t>(kNsPower, kKeyTimeout).load(&v) && v < 3) {
             timeout_ = (ScreenTimeout)v;
         }
-        nvs_close(h);
     }
 
     BaseType_t rc = xTaskCreate(task_trampoline, "screen_power",

@@ -354,28 +354,6 @@ static void destroy_page_status(lv_obj_t *root)
     if (root) lv_obj_del(root);
 }
 
-static lv_obj_t *build_page_placeholder(lv_obj_t *parent, const char *title, const char *hint)
-{
-    lv_obj_t *root = lv_obj_create(parent);
-    lv_obj_set_size(root, 320, 208);
-    lv_obj_set_style_bg_color(root, lv_color_black(), 0);
-    lv_obj_set_style_border_width(root, 0, 0);
-    lv_obj_set_style_pad_all(root, 0, 0);
-
-    lv_obj_t *t = lv_label_create(root);
-    lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(t, lv_color_white(), 0);
-    lv_label_set_text(t, title);
-    lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 30);
-
-    lv_obj_t *h = lv_label_create(root);
-    lv_obj_set_style_text_font(h, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(h, lv_color_hex(0xBBBBBB), 0);
-    lv_label_set_text(h, hint);
-    lv_obj_align(h, LV_ALIGN_TOP_MID, 0, 70);
-    return root;
-}
-
 // Games page shared state (file-scope). CardCb is allocated per picker card and
 // freed when the card is deleted. Both are referenced by free-function event
 // handlers below; they live outside build_page_games() so the handlers can see
@@ -461,7 +439,6 @@ static lv_obj_t *build_page_games(lv_obj_t *parent)
     lv_label_set_text(title, "Pick a game");
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
-    int lvl = Pet::instance().get_state().level;
     pet::LifeStage stg = Pet::instance().stage();
 
     auto make_card = [&](int col, const char *label, uint32_t color,
@@ -1117,10 +1094,6 @@ esp_err_t start_ui()
                  streak, streak * 10);
     }
 
-    // v0.8 Phase 3e: the pet_task body is now PetMainTask::task_loop.
-    // The static `pet_task()` function still lives in this file (so
-    // existing behaviour is preserved); a follow-up commit will delete
-    // it once the migration is fully verified.
     PetMainTask::instance().start();
 
     ESP_LOGI(TAG, "Pet UI started");
